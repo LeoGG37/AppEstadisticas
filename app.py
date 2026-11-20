@@ -100,16 +100,21 @@ def _get_account_list() -> list:
         data = eb.get_session_status(_eb_app_id, _eb_key, _eb_session)
         result = []
         for i, acc in enumerate(data.get("accounts", [])):
-            account_id = acc.get("account_id") or {}
-            iban = account_id.get("iban", "") if isinstance(account_id, dict) else ""
-            tipo = acc.get("account_type") or acc.get("name") or ""
-            if tipo:
-                label = tipo.capitalize()
-            elif iban:
-                label = f"····{iban[-4:]}"
-            else:
+            # La API puede devolver el UID como string o como objeto
+            if isinstance(acc, str):
+                uid = acc
                 label = f"Cuenta {i + 1}"
-            uid = acc.get("uid", "")
+            else:
+                uid = acc.get("uid", "")
+                account_id = acc.get("account_id") or {}
+                iban = account_id.get("iban", "") if isinstance(account_id, dict) else ""
+                tipo = acc.get("account_type") or acc.get("name") or ""
+                if tipo:
+                    label = tipo.capitalize()
+                elif iban:
+                    label = f"····{iban[-4:]}"
+                else:
+                    label = f"Cuenta {i + 1}"
             if not uid:
                 continue
             result.append({"uid": uid, "label": label})
@@ -140,16 +145,22 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
         from datetime import date, timedelta
         date_from = (date.today() - timedelta(days=180)).isoformat()
 
+        import time
         all_raw = []
         for i, uid in enumerate(account_uids):
             if i > 0:
-                import time
-                time.sleep(0.8)  # Pausa entre cuentas para evitar 429 (rate limit)
-            try:
-                raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
-                all_raw.extend(raw)
-            except Exception:
-                pass  # Esta cuenta no devuelve datos; seguimos con las demás
+                time.sleep(1.5)  # Pausa entre cuentas para evitar 429
+            # Reintentos con backoff exponencial si hay rate limiting
+            for intento in range(3):
+                try:
+                    raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
+                    all_raw.extend(raw)
+                    break
+                except Exception as e:
+                    if "429" in str(e) and intento < 2:
+                        time.sleep(3 * (2 ** intento))  # 3s, 6s
+                    else:
+                        break
         if not all_raw:
             return _empty_df()
         return parse_eb_transactions(all_raw)
@@ -663,14 +674,17 @@ with tab5:
                     accs = status.get("accounts", [])
                     st.success(f"Sesión válida — {len(accs)} cuenta(s) encontrada(s)")
                     for acc in accs:
-                        aid = acc.get("account_id") or {}
-                        iban = aid.get("iban", "—") if isinstance(aid, dict) else "—"
-                        st.caption(
-                            f"uid: `{acc.get('uid','?')[:12]}...` | "
-                            f"type: `{acc.get('account_type','—')}` | "
-                            f"name: `{acc.get('name','—')}` | "
-                            f"iban: `{iban}`"
-                        )
+                        if isinstance(acc, str):
+                            st.caption(f"uid: `{acc[:12]}...` (la API devuelve solo el UID)")
+                        else:
+                            aid = acc.get("account_id") or {}
+                            iban = aid.get("iban", "—") if isinstance(aid, dict) else "—"
+                            st.caption(
+                                f"uid: `{acc.get('uid','?')[:12]}...` | "
+                                f"type: `{acc.get('account_type','—')}` | "
+                                f"name: `{acc.get('name','—')}` | "
+                                f"iban: `{iban}`"
+                            )
                 except Exception as e:
                     st.error(f"Sesión inválida: {e}")
             else:

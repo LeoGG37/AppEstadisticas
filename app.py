@@ -140,8 +140,11 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
 
         all_raw = []
         for uid in account_uids:
-            raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
-            all_raw.extend(raw)
+            try:
+                raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
+                all_raw.extend(raw)
+            except Exception:
+                pass  # Esta cuenta no devuelve datos; seguimos con las demás
         return parse_eb_transactions(all_raw)
     except Exception:
         pass
@@ -612,7 +615,7 @@ with tab5:
             st.rerun()
 
     # --- Banco ya conectado ---
-    elif session_id and account_uid:
+    elif session_id and (account_uid or _eb_account_uids):
         st.success("Banco conectado")
         st.caption(f"Session activa · account_uid: `{account_uid[:8]}...`")
         if st.button("Renovar conexión"):

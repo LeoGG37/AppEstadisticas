@@ -141,7 +141,10 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
         date_from = (date.today() - timedelta(days=180)).isoformat()
 
         all_raw = []
-        for uid in account_uids:
+        for i, uid in enumerate(account_uids):
+            if i > 0:
+                import time
+                time.sleep(0.8)  # Pausa entre cuentas para evitar 429 (rate limit)
             try:
                 raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
                 all_raw.extend(raw)
@@ -642,25 +645,53 @@ with tab5:
 
     # --- Diagnóstico ---
     with st.expander("🔍 Diagnóstico de conexión"):
-        if st.button("Probar conexión ahora"):
+        col_d1, col_d2 = st.columns(2)
+        btn_test   = col_d1.button("Probar conexión ahora")
+        btn_reload = col_d2.button("Forzar recarga de datos")
+
+        if btn_reload:
+            load_data.clear()
+            st.session_state.pop("account_list", None)
+            st.rerun()
+
+        if btn_test:
             import enable_banking as eb
-            # 1) Sesión
+            # 1) Sesión + info de cuentas para diagnosticar nombres
             if session_id:
                 try:
                     status = eb.get_session_status(app_id, private_key, session_id)
-                    n = len(status.get("accounts", []))
-                    st.success(f"Sesión válida — {n} cuenta(s) encontrada(s)")
+                    accs = status.get("accounts", [])
+                    st.success(f"Sesión válida — {len(accs)} cuenta(s) encontrada(s)")
+                    for acc in accs:
+                        aid = acc.get("account_id") or {}
+                        iban = aid.get("iban", "—") if isinstance(aid, dict) else "—"
+                        st.caption(
+                            f"uid: `{acc.get('uid','?')[:12]}...` | "
+                            f"type: `{acc.get('account_type','—')}` | "
+                            f"name: `{acc.get('name','—')}` | "
+                            f"iban: `{iban}`"
+                        )
                 except Exception as e:
                     st.error(f"Sesión inválida: {e}")
             else:
                 st.warning("No hay session_id configurado.")
 
-            # 2) Transacciones: mostrar lo que ya hay en caché (sin llamada extra a la API)
+            # 2) Transacciones
             if _eb_account_uids:
                 n_txns = len(df)
                 if n_txns > 0:
-                    st.success(f"Datos cargados — {n_txns} transacción(es) en caché")
+                    st.success(f"Datos en caché — {n_txns} transacción(es)")
                 else:
-                    st.warning("Sin transacciones en caché. Espera unos segundos y recarga la página.")
+                    # Intentar una llamada mínima para ver el error real
+                    st.warning("Sin datos en caché. Probando conexión de transacciones...")
+                    try:
+                        from datetime import date, timedelta
+                        txns = eb.get_transactions(
+                            app_id, private_key, _eb_account_uids[0],
+                            date_from=(date.today() - timedelta(days=1)).isoformat(),
+                        )
+                        st.info(f"API responde: {len(txns)} movimiento(s) ayer. Pulsa **Forzar recarga** para cargar los datos.")
+                    except Exception as e:
+                        st.error(f"Error al obtener transacciones: {e}")
             else:
                 st.warning("No hay account_uid configurado.")

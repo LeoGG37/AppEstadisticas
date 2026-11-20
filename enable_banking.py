@@ -50,6 +50,7 @@ def start_auth(
     redirect_url: str,
     aspsp_name: str,
     aspsp_country: str = "ES",
+    state: str = "gastos_app",
 ) -> dict:
     """Inicia el flujo de autorización con el banco. Devuelve url y authorization_id."""
     token = _make_jwt(application_id, private_key_pem)
@@ -65,7 +66,7 @@ def start_auth(
                 "transactions": True,
             },
             "aspsp": {"name": aspsp_name, "country": aspsp_country},
-            "state": "gastos_app",
+            "state": state,
             "redirect_url": redirect_url,
             "psu_type": "personal",
         },
@@ -123,8 +124,10 @@ def get_transactions(
     data = resp.json()
     all_txns = list(data.get("transactions", []))
 
-    # Paginación
-    while data.get("continuation_key"):
+    # Paginación (máximo 50 páginas para evitar bucles infinitos)
+    page = 0
+    while data.get("continuation_key") and page < 50:
+        page += 1
         params["continuation_key"] = data["continuation_key"]
         resp = requests.get(
             f"{API_URL}/accounts/{account_uid}/transactions",

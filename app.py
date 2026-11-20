@@ -82,15 +82,11 @@ def load_data():
             import enable_banking as eb
             from datetime import date, timedelta
 
-            print(f"[Enable Banking] Conectando con account_uid={account_uid[:8]}...")
             date_from = (date.today() - timedelta(days=180)).isoformat()
             raw = eb.get_transactions(app_id, private_key, account_uid, date_from=date_from)
-            print(f"[Enable Banking] Transacciones recibidas: {len(raw)}")
             return parse_eb_transactions(raw)
-        else:
-            print(f"[Enable Banking] Credenciales incompletas: app_id={bool(app_id)} key={bool(private_key)} session={bool(session_id)} account={bool(account_uid)}")
-    except Exception as e:
-        print(f"[Enable Banking] Error: {e}")  # visible en el terminal
+    except Exception:
+        pass
 
     return get_transactions()
 
@@ -116,22 +112,30 @@ _oauth_code = st.query_params.get("code")
 
 
 def _mostrar_enlace_auth(app_id, private_key):
-    """Genera y muestra el enlace de autorización de Santander."""
+    """Genera (o reutiliza) el enlace de autorización de Santander."""
+    import secrets as _secrets
     REDIRECT_URL = "https://appestadisticas-zapp2pp7lgzrnzsxvp2qdth.streamlit.app"
-    try:
-        import enable_banking as eb
-        auth_data = eb.start_auth(app_id, private_key, REDIRECT_URL, "Banco Santander", "ES")
-        auth_url = auth_data.get("url")
-        if auth_url:
-            st.markdown(
-                "**Pulsa el enlace para autorizar el acceso en Santander:**\n\n"
-                f"[Ir a Santander para autorizar]({auth_url})"
-            )
-            st.caption("Después de autorizar, serás redirigido aquí automáticamente.")
-        else:
-            st.error("No se pudo obtener la URL de autorización.")
-    except Exception as e:
-        st.error(f"Error al iniciar autorización: {e}")
+
+    if "auth_url" not in st.session_state:
+        try:
+            import enable_banking as eb
+            state = _secrets.token_urlsafe(16)
+            st.session_state["oauth_state"] = state
+            auth_data = eb.start_auth(app_id, private_key, REDIRECT_URL, "Banco Santander", "ES", state=state)
+            st.session_state["auth_url"] = auth_data.get("url")
+        except Exception as e:
+            st.error(f"Error al iniciar autorización: {e}")
+            return
+        finally:
+            st.session_state["iniciar_auth"] = False
+
+    auth_url = st.session_state.get("auth_url")
+    if auth_url:
+        st.markdown(
+            "**Pulsa el enlace para autorizar el acceso en Santander:**\n\n"
+            f"[Ir a Santander para autorizar]({auth_url})"
+        )
+        st.caption("Después de autorizar, serás redirigido aquí automáticamente.")
 
 
 # --- Tabs principales ---
@@ -446,55 +450,68 @@ with tab5:
 
     # --- Callback OAuth: Santander ha redirigido con ?code=... ---
     if _oauth_code:
-        st.info("Código de autorización recibido. Obteniendo sesión...")
-        try:
-            import enable_banking as eb
-            session_data = eb.exchange_code(app_id, private_key, _oauth_code)
-            new_session_id = session_data["session_id"]
-            accounts = session_data.get("accounts", [])
-            new_account_uid = accounts[0]["uid"] if accounts else None
+        received_state = st.query_params.get("state", "")
+        expected_state = st.session_state.get("oauth_state", "")
+        if expected_state and received_state != expected_state:
+            st.error("Estado OAuth inválido. Vuelve a intentar la conexión.")
+        else:
+            st.info("Código de autorización recibido. Obteniendo sesión...")
+            try:
+                import enable_banking as eb
+                session_data = eb.exchange_code(app_id, private_key, _oauth_code)
+                new_session_id = session_data["session_id"]
+                accounts = session_data.get("accounts", [])
+                new_account_uid = accounts[0]["uid"] if accounts else None
 
-            if new_session_id and new_account_uid:
-                st.success("¡Autorización completada!")
-                st.markdown("**Copia estos valores en los Secrets de Streamlit Cloud:**")
-                st.code(
-                    f'[enable_banking]\n'
-                    f'application_id = "{app_id}"\n'
-                    f'session_id = "{new_session_id}"\n'
-                    f'account_uid = "{new_account_uid}"',
-                    language="toml",
-                )
-                st.markdown(
-                    "Ve a **Streamlit Cloud → tu app → Settings → Secrets** "
-                    "y añade `session_id` y `account_uid` dentro de `[enable_banking]`."
-                )
-                # Limpiar el parámetro de la URL
-                if st.button("Listo, limpiar URL"):
+                if new_session_id and new_account_uid:
+                    st.session_state["new_credentials"] = {
+                        "session_id": new_session_id,
+                        "account_uid": new_account_uid,
+                    }
                     st.query_params.clear()
-                    st.cache_data.clear()
+                    st.session_state.pop("oauth_state", None)
+                    st.session_state.pop("auth_url", None)
                     st.rerun()
-            else:
-                st.error("No se encontraron cuentas en la sesión.")
-        except Exception as e:
-            st.error(f"Error al obtener sesión: {e}")
+                else:
+                    st.error("No se encontraron cuentas en la sesión.")
+            except Exception as e:
+                st.error(f"Error al obtener sesión: {e}")
 
-    # --- Estado actual de la conexión ---
+    # --- Credenciales recién obtenidas (tras limpiar la URL) ---
+    elif st.session_state.get("new_credentials"):
+        creds = st.session_state["new_credentials"]
+        st.success("¡Autorización completada!")
+        st.markdown("**Copia estos valores en los Secrets de Streamlit Cloud (dentro de `[enable_banking]`):**")
+        st.code(
+            f'session_id = "{creds["session_id"]}"\n'
+            f'account_uid = "{creds["account_uid"]}"',
+            language="toml",
+        )
+        st.markdown(
+            "Ve a **Streamlit Cloud → tu app → Settings → Secrets** "
+            "y añade estos dos valores dentro de `[enable_banking]`."
+        )
+        if st.button("Listo"):
+            st.session_state.pop("new_credentials", None)
+            st.rerun()
+
+    # --- Banco ya conectado ---
     elif session_id and account_uid:
         st.success("Banco conectado")
         st.caption(f"Session activa · account_uid: `{account_uid[:8]}...`")
-        if st.button("Renovar conexión (nueva autorización)"):
+        if st.button("Renovar conexión"):
             st.session_state["iniciar_auth"] = True
+            st.session_state.pop("auth_url", None)
             st.rerun()
-
         if st.session_state.get("iniciar_auth"):
             _mostrar_enlace_auth(app_id, private_key)
 
-    # --- Sin sesión: botón para iniciar autorización ---
+    # --- Sin sesión ---
     else:
         st.warning("No hay banco conectado.")
         if st.button("Conectar Santander"):
             st.session_state["iniciar_auth"] = True
+            st.session_state.pop("auth_url", None)
             st.rerun()
-
         if st.session_state.get("iniciar_auth"):
             _mostrar_enlace_auth(app_id, private_key)

@@ -90,7 +90,7 @@ def is_income(description: str) -> bool:
 
 
 def _make_transactions() -> pd.DataFrame:
-    random.seed(42)
+    rng = random.Random(42)
     rows = []
     today = date(2026, 11, 20)
 
@@ -146,10 +146,10 @@ def _make_transactions() -> pd.DataFrame:
                 })
 
         for v in variables:
-            n = random.randint(v["veces"][0], v["veces"][1])
+            n = rng.randint(v["veces"][0], v["veces"][1])
             for _ in range(n):
-                dia = random.randint(1, last_day)
-                monto = round(random.uniform(v["rango"][0], v["rango"][1]) * factor, 2)
+                dia = rng.randint(1, last_day)
+                monto = round(rng.uniform(v["rango"][0], v["rango"][1]) * factor, 2)
                 rows.append({
                     "fecha":       date(year, month, dia),
                     "monto":       monto,

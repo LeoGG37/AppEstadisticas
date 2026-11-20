@@ -655,17 +655,12 @@ with tab5:
             else:
                 st.warning("No hay session_id configurado.")
 
-            # 2) Transacciones de la primera cuenta
-            uid_prueba = (_eb_account_uids or [None])[0]
-            if uid_prueba:
-                try:
-                    from datetime import date, timedelta
-                    txns = eb.get_transactions(
-                        app_id, private_key, uid_prueba,
-                        date_from=(date.today() - timedelta(days=7)).isoformat(),
-                    )
-                    st.success(f"Transacciones OK — {len(txns)} movimiento(s) en los últimos 7 días")
-                except Exception as e:
-                    st.error(f"Error al obtener transacciones: {e}")
+            # 2) Transacciones: mostrar lo que ya hay en caché (sin llamada extra a la API)
+            if _eb_account_uids:
+                n_txns = len(df)
+                if n_txns > 0:
+                    st.success(f"Datos cargados — {n_txns} transacción(es) en caché")
+                else:
+                    st.warning("Sin transacciones en caché. Espera unos segundos y recarga la página.")
             else:
                 st.warning("No hay account_uid configurado.")

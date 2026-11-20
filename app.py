@@ -12,8 +12,14 @@ from data import (
     parse_eb_transactions,
     monthly_summary,
     COLORS,
-    CAT_COLORS,
-    DEFAULT_CATEGORIAS,
+    CATEGORIA_OTROS,
+    ajustes_por_defecto,
+    anadir_categoria,
+    renombrar_categoria,
+    borrar_categoria,
+    aplicar_ajustes,
+    exportar_ajustes,
+    importar_ajustes,
 )
 
 # --- Configuración de página ---
@@ -227,13 +233,17 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
 
     return parse_eb_transactions(raw_total), sin_actualizar
 
-# --- Categorías en session_state (persisten durante la sesión) ---
-if "categorias" not in st.session_state:
-    st.session_state.categorias = DEFAULT_CATEGORIAS.copy()
+@st.cache_resource
+def _ajustes() -> dict:
+    """Categorías y clasificaciones del usuario, compartidas por todas las sesiones.
 
-# --- Clasificaciones manuales guardadas por el usuario ---
-if "clasificaciones_manuales" not in st.session_state:
-    st.session_state.clasificaciones_manuales = {}
+    Sobreviven a recargas y son las mismas en el móvil y en el PC, pero se pierden
+    al reiniciar la app: para eso está la copia descargable de la pestaña Categorías.
+    """
+    return ajustes_por_defecto()
+
+
+AJUSTES = _ajustes()
 
 # --- Título ---
 st.title("Mis Gastos")
@@ -290,9 +300,8 @@ if _sin_actualizar:
             _partes.append(f"{_nombre} (sin datos todavía)")
     st.caption("⚠️ No se pudieron actualizar: " + ", ".join(_partes))
 
-# Aplicar clasificaciones manuales al DataFrame
-for desc, cat in st.session_state.clasificaciones_manuales.items():
-    df.loc[df["descripcion"] == desc, "categoria"] = cat
+# Aplicar cambios de nombre y clasificaciones manuales del usuario
+df = aplicar_ajustes(df, AJUSTES)
 
 
 def _mostrar_enlace_auth(app_id, private_key):
@@ -356,13 +365,12 @@ with tab1:
                     with st.container(horizontal=True, vertical_alignment="center"):
                         cat_elegida = st.selectbox(
                             "Categoría",
-                            st.session_state.categorias,
+                            AJUSTES["categorias"],
                             key=f"sc_{desc}",
                             label_visibility="collapsed",
                         )
                         if st.button("Guardar", key=f"btn_{desc}"):
-                            st.session_state.clasificaciones_manuales[desc] = cat_elegida
-                            df.loc[df["descripcion"] == desc, "categoria"] = cat_elegida
+                            AJUSTES["clasificaciones"][desc] = cat_elegida
                             st.rerun()
 
         ingresos  = df_mes[df_mes["tipo"] == "ingreso"]["monto"].sum()
@@ -505,7 +513,7 @@ with tab3:
         col_chart, col_list = st.columns([1, 1])
 
         with col_chart:
-            colores_donut = [CAT_COLORS.get(c, COLORS["neutral"]) for c in por_cat.index]
+            colores_donut = [AJUSTES["colores"].get(c, COLORS["neutral"]) for c in por_cat.index]
             fig2 = go.Figure(go.Pie(
                 labels=por_cat.index,
                 values=por_cat.values,
@@ -526,7 +534,7 @@ with tab3:
             total_mes = por_cat.sum()
             for cat, importe in por_cat.items():
                 pct = round(importe / total_mes * 100) if total_mes > 0 else 0
-                color = CAT_COLORS.get(cat, COLORS["neutral"])
+                color = AJUSTES["colores"].get(cat, COLORS["neutral"])
                 st.markdown(
                     f'<div style="display:flex;justify-content:space-between;'
                     f'margin-bottom:2px;">'
@@ -542,27 +550,85 @@ with tab3:
 
         st.divider()
 
-    # Editor de categorías (siempre visible)
+    # --- Editor de categorías ---
+    # Los cambios se aplican en callbacks (on_change / on_click), que se ejecutan
+    # antes de repintar la página; así el campo de texto se puede vaciar sin bucles.
+    def _al_anadir():
+        st.session_state["error_cat"] = anadir_categoria(AJUSTES, st.session_state["nueva_cat"])
+        st.session_state["nueva_cat"] = ""
+
+    def _al_renombrar(viejo: str):
+        clave = f"cat_{viejo}"
+        error = renombrar_categoria(AJUSTES, viejo, st.session_state[clave])
+        st.session_state["error_cat"] = error
+        if error:
+            st.session_state[clave] = viejo  # Deshacer lo escrito
+
+    def _al_borrar(nombre: str):
+        st.session_state["error_cat"] = borrar_categoria(AJUSTES, nombre)
+
     with st.expander("Editar categorías"):
-        st.caption("Puedes renombrar o eliminar categorías, y añadir nuevas.")
+        st.caption(
+            "Renombra, elimina o añade categorías. Al eliminar una, sus movimientos pasan a "
+            f"«{CATEGORIA_OTROS}», que no se puede cambiar."
+        )
+        st.text_input(
+            "Nueva categoría", key="nueva_cat", on_change=_al_anadir,
+            placeholder="Escribe el nombre y pulsa Enter",
+        )
+        error_cat = st.session_state.pop("error_cat", None)
+        if error_cat:
+            st.error(error_cat)
 
-        cats = st.session_state.categorias
-        nueva = st.text_input("Nueva categoría", placeholder="Escribe el nombre y pulsa Enter")
-        if nueva and nueva not in cats:
-            cats.append(nueva)
-            st.session_state.categorias = cats
-            st.rerun()
-
-        for i, cat in enumerate(cats):
+        for cat in list(AJUSTES["categorias"]):
+            fija = cat == CATEGORIA_OTROS
+            clave = f"cat_{cat}"
+            if clave not in st.session_state:
+                st.session_state[clave] = cat  # Valor inicial del campo (sin usar value=)
             # Nombre y botón de borrar en la misma fila, también en el móvil
             with st.container(horizontal=True, vertical_alignment="center"):
-                nuevo_nombre = st.text_input(f"cat_{i}", value=cat, label_visibility="collapsed")
-                if nuevo_nombre != cat:
-                    st.session_state.categorias[i] = nuevo_nombre
-                    st.rerun()
-                if st.button("✕", key=f"del_{i}", help=f"Eliminar {cat}"):
-                    st.session_state.categorias.pop(i)
-                    st.rerun()
+                st.text_input(
+                    cat, key=clave, label_visibility="collapsed",
+                    on_change=_al_renombrar, args=(cat,), disabled=fija,
+                )
+                st.button(
+                    "✕", key=f"del_{cat}", help=f"Eliminar {cat}",
+                    on_click=_al_borrar, args=(cat,), disabled=fija,
+                )
+
+    # --- Copia de seguridad de las categorías ---
+    with st.expander("Copia de seguridad de categorías"):
+        st.caption(
+            "Las categorías se guardan en la memoria del servidor: se mantienen al recargar y "
+            "entre dispositivos, pero **se pierden cada vez que la app se reinicia** (por "
+            "ejemplo al hacer push). Descarga una copia después de cambiarlas y súbela tras un reinicio."
+        )
+        st.download_button(
+            "Descargar copia",
+            data=exportar_ajustes(AJUSTES),
+            file_name=f"categorias_gastos_{date.today():%Y%m%d}.json",
+            mime="application/json",
+        )
+        st.caption("⚠️ La copia incluye nombres de comercios: guárdala en un sitio privado.")
+
+        copia_ok = st.session_state.pop("copia_ok", None)
+        if copia_ok:
+            st.success(copia_ok)
+
+        # 1 MB: una copia real ocupa unos pocos KB; evita subir archivos grandes al servidor
+        archivo = st.file_uploader("Subir copia", type=["json"], key="subir_copia", max_upload_size=1)
+        # El archivo sigue en el widget en cada recarga: se aplica solo una vez por subida
+        if archivo is not None and st.session_state.get("copia_aplicada") != archivo.file_id:
+            st.session_state["copia_aplicada"] = archivo.file_id
+            try:
+                nuevos = importar_ajustes(archivo.getvalue())
+            except ValueError as e:
+                st.error(f"No se ha aplicado la copia: {e}")
+            else:
+                AJUSTES.clear()
+                AJUSTES.update(nuevos)
+                st.session_state["copia_ok"] = f"Copia aplicada: {len(nuevos['categorias'])} categorías restauradas."
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════

@@ -66,31 +66,68 @@ footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- Carga de datos (cacheada 5 min) ---
+# --- Credenciales Enable Banking ---
+try:
+    _eb_cfg     = st.secrets.get("enable_banking", {})
+    _eb_app_id  = _eb_cfg.get("application_id")
+    _eb_key     = _eb_cfg.get("private_key")
+    _eb_session = _eb_cfg.get("session_id") or st.secrets.get("session_id")
+    _eb_account = _eb_cfg.get("account_uid") or st.secrets.get("account_uid")
+except Exception:
+    _eb_cfg = {}
+    _eb_app_id = _eb_key = _eb_session = _eb_account = None
+
+
+def _get_account_list() -> list:
+    """Devuelve [{uid, label}] para las cuentas de la sesión activa."""
+    if "account_list" in st.session_state:
+        return st.session_state["account_list"]
+    if not all([_eb_app_id, _eb_key, _eb_session]):
+        return []
+    try:
+        import enable_banking as eb
+        data = eb.get_session_status(_eb_app_id, _eb_key, _eb_session)
+        result = []
+        for i, acc in enumerate(data.get("accounts", [])):
+            account_id = acc.get("account_id") or {}
+            iban = account_id.get("iban", "") if isinstance(account_id, dict) else ""
+            tipo = acc.get("account_type") or acc.get("name") or ""
+            if tipo:
+                label = tipo.capitalize()
+            elif iban:
+                label = f"····{iban[-4:]}"
+            else:
+                label = f"Cuenta {i + 1}"
+            result.append({"uid": acc["uid"], "label": label})
+        st.session_state["account_list"] = result
+        return result
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=300)
-def load_data():
-    # Intentar con Enable Banking si hay sesión activa
+def load_data(account_uids: tuple) -> pd.DataFrame:
+    """Carga y combina transacciones de las cuentas seleccionadas."""
     try:
         cfg = st.secrets.get("enable_banking", {})
         app_id = cfg.get("application_id")
         private_key = cfg.get("private_key")
-        # session_id y account_uid pueden estar en [enable_banking] o al nivel raíz
-        session_id = cfg.get("session_id") or st.secrets.get("session_id")
-        account_uid = cfg.get("account_uid") or st.secrets.get("account_uid")
 
-        if all([app_id, private_key, session_id, account_uid]):
-            import enable_banking as eb
-            from datetime import date, timedelta
+        if not all([app_id, private_key]) or not account_uids:
+            return get_transactions()
 
-            date_from = (date.today() - timedelta(days=180)).isoformat()
-            raw = eb.get_transactions(app_id, private_key, account_uid, date_from=date_from)
-            return parse_eb_transactions(raw)
+        import enable_banking as eb
+        from datetime import date, timedelta
+        date_from = (date.today() - timedelta(days=180)).isoformat()
+
+        all_raw = []
+        for uid in account_uids:
+            raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
+            all_raw.extend(raw)
+        return parse_eb_transactions(all_raw)
     except Exception:
         pass
-
     return get_transactions()
-
-df = load_data()
 
 # --- Categorías en session_state (persisten durante la sesión) ---
 if "categorias" not in st.session_state:
@@ -100,15 +137,37 @@ if "categorias" not in st.session_state:
 if "clasificaciones_manuales" not in st.session_state:
     st.session_state.clasificaciones_manuales = {}
 
-# Aplicar clasificaciones manuales guardadas al DataFrame
-for desc, cat in st.session_state.clasificaciones_manuales.items():
-    df.loc[df["descripcion"] == desc, "categoria"] = cat
-
 # --- Título ---
 st.title("Mis Gastos")
 
 # --- Detectar callback OAuth (Santander redirige con ?code=...) ---
 _oauth_code = st.query_params.get("code")
+
+# --- Selector de cuentas (encima de las pestañas) ---
+_accounts = _get_account_list()
+
+if len(_accounts) > 1:
+    _uid_map = {a["uid"]: a["label"] for a in _accounts}
+    _selected = st.multiselect(
+        "Cuentas",
+        options=list(_uid_map.keys()),
+        default=list(_uid_map.keys()),
+        format_func=lambda uid: _uid_map.get(uid, uid[:8]),
+        label_visibility="collapsed",
+    )
+    _selected_uids = tuple(_selected) if _selected else tuple(_uid_map.keys())
+elif _accounts:
+    _selected_uids = (_accounts[0]["uid"],)
+elif _eb_account:
+    _selected_uids = (_eb_account,)
+else:
+    _selected_uids = ()
+
+df = load_data(_selected_uids)
+
+# Aplicar clasificaciones manuales al DataFrame
+for desc, cat in st.session_state.clasificaciones_manuales.items():
+    df.loc[df["descripcion"] == desc, "categoria"] = cat
 
 
 def _mostrar_enlace_auth(app_id, private_key):
@@ -442,11 +501,10 @@ with tab4:
 with tab5:
     st.markdown("### Conexión con Santander")
 
-    cfg = st.secrets.get("enable_banking", {})
-    app_id = cfg.get("application_id")
-    private_key = cfg.get("private_key")
-    session_id = cfg.get("session_id") or st.secrets.get("session_id")
-    account_uid = cfg.get("account_uid") or st.secrets.get("account_uid")
+    app_id = _eb_app_id
+    private_key = _eb_key
+    session_id = _eb_session
+    account_uid = _eb_account
 
     # --- Callback OAuth: Santander ha redirigido con ?code=... ---
     if _oauth_code:

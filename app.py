@@ -35,8 +35,10 @@ def check_password() -> bool:
     col = st.columns([1, 2, 1])[1]
     with col:
         st.markdown("### Mis Gastos")
-        pwd = st.text_input("Contraseña", type="password", placeholder="Introduce tu contraseña")
-        if st.button("Entrar", use_container_width=True):
+        with st.form("login", clear_on_submit=False):
+            pwd = st.text_input("Contraseña", type="password", placeholder="Introduce tu contraseña")
+            submitted = st.form_submit_button("Entrar", use_container_width=True)
+        if submitted:
             if pwd == password_correcta:
                 st.session_state["authenticated"] = True
                 st.rerun()

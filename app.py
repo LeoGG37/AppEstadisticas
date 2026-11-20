@@ -105,16 +105,22 @@ def _get_account_list() -> list:
         return []
 
 
+def _empty_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
+
+
 @st.cache_data(ttl=300)
 def load_data(account_uids: tuple) -> pd.DataFrame:
     """Carga y combina transacciones de las cuentas seleccionadas."""
+    if not account_uids:
+        return _empty_df()
     try:
         cfg = st.secrets.get("enable_banking", {})
         app_id = cfg.get("application_id")
         private_key = cfg.get("private_key")
 
-        if not all([app_id, private_key]) or not account_uids:
-            return get_transactions()
+        if not all([app_id, private_key]):
+            return _empty_df()
 
         import enable_banking as eb
         from datetime import date, timedelta
@@ -127,7 +133,7 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
         return parse_eb_transactions(all_raw)
     except Exception:
         pass
-    return get_transactions()
+    return _empty_df()
 
 # --- Categorías en session_state (persisten durante la sesión) ---
 if "categorias" not in st.session_state:
@@ -206,103 +212,106 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dashboard", "Histórico", "Categorías"
 # ═══════════════════════════════════════════════
 with tab1:
     meses = sorted(df["mes"].unique(), reverse=True)
-    mes_sel = st.selectbox(
-        "Mes",
-        meses,
-        format_func=lambda m: m.strftime("%B %Y").capitalize(),
-        label_visibility="collapsed",
-    )
-
-    df_mes = df[df["mes"] == mes_sel]
-
-    # --- Notificación de transacciones sin clasificar ---
-    sin_clasificar = df[
-        (df["categoria"] == "Otros") & (df["tipo"] == "gasto")
-    ]["descripcion"].unique()
-
-    if len(sin_clasificar) > 0:
-        with st.expander(f"⚠️ {len(sin_clasificar)} comercio(s) sin clasificar — pulsa para asignarles una categoría"):
-            for desc in sin_clasificar:
-                col_desc, col_cat, col_btn = st.columns([3, 2, 1])
-                col_desc.markdown(f"**{desc}**")
-                cat_elegida = col_cat.selectbox(
-                    "Categoría",
-                    st.session_state.categorias,
-                    key=f"sc_{desc}",
-                    label_visibility="collapsed",
-                )
-                if col_btn.button("Guardar", key=f"btn_{desc}"):
-                    st.session_state.clasificaciones_manuales[desc] = cat_elegida
-                    df.loc[df["descripcion"] == desc, "categoria"] = cat_elegida
-                    st.rerun()
-
-    ingresos  = df_mes[df_mes["tipo"] == "ingreso"]["monto"].sum()
-    gastos    = abs(df_mes[df_mes["tipo"] == "gasto"]["monto"].sum())
-    balance   = ingresos - gastos
-    ahorro    = round((balance / ingresos * 100), 1) if ingresos > 0 else 0.0
-
-    # Tarjetas de métricas
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ingresos",  f"{ingresos:,.2f} €")
-    c2.metric("Gastos",    f"{gastos:,.2f} €")
-    c3.metric(
-        "Balance",
-        f"{balance:,.2f} €",
-        delta=f"{'↑' if balance >= 0 else '↓'} {abs(balance):,.0f} €",
-        delta_color="normal" if balance >= 0 else "inverse",
-    )
-    c4.metric("Ahorro", f"{ahorro:.1f}%")
-
-    st.divider()
-
-    col_rec, col_top = st.columns(2)
-
-    # --- Recurrentes ---
-    with col_rec:
-        st.markdown("**Gastos recurrentes**")
-        recurrentes = df_mes[
-            (df_mes["recurrente"] == True) & (df_mes["tipo"] == "gasto")
-        ][["descripcion", "monto"]].copy()
-        recurrentes["monto"] = recurrentes["monto"].abs()
-
-        if recurrentes.empty:
-            st.caption("Sin recurrentes este mes.")
-        else:
-            for _, row in recurrentes.iterrows():
-                ca, cb = st.columns([3, 1])
-                ca.markdown(
-                    f'<span style="background:#E6F1FB;color:#185FA5;'
-                    f'font-size:11px;padding:2px 7px;border-radius:6px;'
-                    f'margin-right:6px;">mensual</span>{row["descripcion"]}',
-                    unsafe_allow_html=True,
-                )
-                cb.markdown(
-                    f'<p style="text-align:right;font-weight:500;">'
-                    f'{row["monto"]:,.2f} €</p>',
-                    unsafe_allow_html=True,
-                )
-
-    # --- Top 5 comercios ---
-    with col_top:
-        st.markdown("**Top 5 comercios**")
-        top5 = (
-            df_mes[df_mes["tipo"] == "gasto"]
-            .groupby("descripcion")["monto"]
-            .sum()
-            .abs()
-            .nlargest(5)
+    if not meses:
+        st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
+    else:
+        mes_sel = st.selectbox(
+            "Mes",
+            meses,
+            format_func=lambda m: m.strftime("%B %Y").capitalize(),
+            label_visibility="collapsed",
         )
-        if top5.empty:
-            st.caption("Sin datos.")
-        else:
-            for i, (nombre, importe) in enumerate(top5.items(), 1):
-                ca, cb = st.columns([3, 1])
-                ca.write(f"{i}. {nombre}")
-                cb.markdown(
-                    f'<p style="text-align:right;font-weight:500;'
-                    f'color:{COLORS["income"]};">{importe:,.2f} €</p>',
-                    unsafe_allow_html=True,
-                )
+
+        df_mes = df[df["mes"] == mes_sel]
+
+        # --- Notificación de transacciones sin clasificar ---
+        sin_clasificar = df[
+            (df["categoria"] == "Otros") & (df["tipo"] == "gasto")
+        ]["descripcion"].unique()
+
+        if len(sin_clasificar) > 0:
+            with st.expander(f"⚠️ {len(sin_clasificar)} comercio(s) sin clasificar — pulsa para asignarles una categoría"):
+                for desc in sin_clasificar:
+                    col_desc, col_cat, col_btn = st.columns([3, 2, 1])
+                    col_desc.markdown(f"**{desc}**")
+                    cat_elegida = col_cat.selectbox(
+                        "Categoría",
+                        st.session_state.categorias,
+                        key=f"sc_{desc}",
+                        label_visibility="collapsed",
+                    )
+                    if col_btn.button("Guardar", key=f"btn_{desc}"):
+                        st.session_state.clasificaciones_manuales[desc] = cat_elegida
+                        df.loc[df["descripcion"] == desc, "categoria"] = cat_elegida
+                        st.rerun()
+
+        ingresos  = df_mes[df_mes["tipo"] == "ingreso"]["monto"].sum()
+        gastos    = abs(df_mes[df_mes["tipo"] == "gasto"]["monto"].sum())
+        balance   = ingresos - gastos
+        ahorro    = round((balance / ingresos * 100), 1) if ingresos > 0 else 0.0
+
+        # Tarjetas de métricas
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Ingresos",  f"{ingresos:,.2f} €")
+        c2.metric("Gastos",    f"{gastos:,.2f} €")
+        c3.metric(
+            "Balance",
+            f"{balance:,.2f} €",
+            delta=f"{'↑' if balance >= 0 else '↓'} {abs(balance):,.0f} €",
+            delta_color="normal" if balance >= 0 else "inverse",
+        )
+        c4.metric("Ahorro", f"{ahorro:.1f}%")
+
+        st.divider()
+
+        col_rec, col_top = st.columns(2)
+
+        # --- Recurrentes ---
+        with col_rec:
+            st.markdown("**Gastos recurrentes**")
+            recurrentes = df_mes[
+                (df_mes["recurrente"] == True) & (df_mes["tipo"] == "gasto")
+            ][["descripcion", "monto"]].copy()
+            recurrentes["monto"] = recurrentes["monto"].abs()
+
+            if recurrentes.empty:
+                st.caption("Sin recurrentes este mes.")
+            else:
+                for _, row in recurrentes.iterrows():
+                    ca, cb = st.columns([3, 1])
+                    ca.markdown(
+                        f'<span style="background:#E6F1FB;color:#185FA5;'
+                        f'font-size:11px;padding:2px 7px;border-radius:6px;'
+                        f'margin-right:6px;">mensual</span>{row["descripcion"]}',
+                        unsafe_allow_html=True,
+                    )
+                    cb.markdown(
+                        f'<p style="text-align:right;font-weight:500;">'
+                        f'{row["monto"]:,.2f} €</p>',
+                        unsafe_allow_html=True,
+                    )
+
+        # --- Top 5 comercios ---
+        with col_top:
+            st.markdown("**Top 5 comercios**")
+            top5 = (
+                df_mes[df_mes["tipo"] == "gasto"]
+                .groupby("descripcion")["monto"]
+                .sum()
+                .abs()
+                .nlargest(5)
+            )
+            if top5.empty:
+                st.caption("Sin datos.")
+            else:
+                for i, (nombre, importe) in enumerate(top5.items(), 1):
+                    ca, cb = st.columns([3, 1])
+                    ca.write(f"{i}. {nombre}")
+                    cb.markdown(
+                        f'<p style="text-align:right;font-weight:500;'
+                        f'color:{COLORS["income"]};">{importe:,.2f} €</p>',
+                        unsafe_allow_html=True,
+                    )
 
 
 # ═══════════════════════════════════════════════
@@ -348,14 +357,15 @@ with tab2:
     st.divider()
 
     # Métricas de resumen
-    mejor_mes = resumen["balance"].idxmax()
-    meses_deficit = resumen["deficit"].sum()
-    ahorro_total = resumen[resumen["balance"] > 0]["balance"].sum()
+    if not resumen.empty:
+        mejor_mes = resumen["balance"].idxmax()
+        meses_deficit = resumen["deficit"].sum()
+        ahorro_total = resumen[resumen["balance"] > 0]["balance"].sum()
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Mejor mes",        mejor_mes.strftime("%B %Y").capitalize())
-    c2.metric("Meses en déficit", f"{int(meses_deficit)} de {len(resumen)}")
-    c3.metric("Ahorro acumulado", f"{ahorro_total:,.0f} €")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Mejor mes",        mejor_mes.strftime("%B %Y").capitalize())
+        c2.metric("Meses en déficit", f"{int(meses_deficit)} de {len(resumen)}")
+        c3.metric("Ahorro acumulado", f"{ahorro_total:,.0f} €")
 
 
 # ═══════════════════════════════════════════════
@@ -363,58 +373,61 @@ with tab2:
 # ═══════════════════════════════════════════════
 with tab3:
     meses_c = sorted(df["mes"].unique(), reverse=True)
-    mes_c = st.selectbox(
-        "Mes",
-        meses_c,
-        format_func=lambda m: m.strftime("%B %Y").capitalize(),
-        label_visibility="collapsed",
-        key="mes_categorias",
-    )
-
-    df_c = df[(df["mes"] == mes_c) & (df["tipo"] == "gasto")]
-    por_cat = df_c.groupby("categoria")["monto"].sum().abs().sort_values(ascending=False)
-
-    col_chart, col_list = st.columns([1, 1])
-
-    with col_chart:
-        colores_donut = [CAT_COLORS.get(c, COLORS["neutral"]) for c in por_cat.index]
-        fig2 = go.Figure(go.Pie(
-            labels=por_cat.index,
-            values=por_cat.values,
-            hole=0.6,
-            marker_colors=colores_donut,
-            textinfo="percent",
-            hovertemplate="%{label}: %{value:,.2f} €<extra></extra>",
-        ))
-        fig2.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=0, r=0, t=10, b=0),
-            showlegend=False,
-            height=250,
+    if not meses_c:
+        st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
+    else:
+        mes_c = st.selectbox(
+            "Mes",
+            meses_c,
+            format_func=lambda m: m.strftime("%B %Y").capitalize(),
+            label_visibility="collapsed",
+            key="mes_categorias",
         )
-        st.plotly_chart(fig2, use_container_width=True)
 
-    with col_list:
-        total_mes = por_cat.sum()
-        for cat, importe in por_cat.items():
-            pct = round(importe / total_mes * 100) if total_mes > 0 else 0
-            color = CAT_COLORS.get(cat, COLORS["neutral"])
-            st.markdown(
-                f'<div style="display:flex;justify-content:space-between;'
-                f'margin-bottom:2px;">'
-                f'<span style="font-size:13px;">● {cat}</span>'
-                f'<span style="font-size:13px;font-weight:500;">{importe:,.2f} €</span>'
-                f'</div>'
-                f'<div style="background:#f0efec;border-radius:4px;height:4px;'
-                f'margin-bottom:10px;">'
-                f'<div style="background:{color};height:4px;border-radius:4px;'
-                f'width:{pct}%;"></div></div>',
-                unsafe_allow_html=True,
+        df_c = df[(df["mes"] == mes_c) & (df["tipo"] == "gasto")]
+        por_cat = df_c.groupby("categoria")["monto"].sum().abs().sort_values(ascending=False)
+
+        col_chart, col_list = st.columns([1, 1])
+
+        with col_chart:
+            colores_donut = [CAT_COLORS.get(c, COLORS["neutral"]) for c in por_cat.index]
+            fig2 = go.Figure(go.Pie(
+                labels=por_cat.index,
+                values=por_cat.values,
+                hole=0.6,
+                marker_colors=colores_donut,
+                textinfo="percent",
+                hovertemplate="%{label}: %{value:,.2f} €<extra></extra>",
+            ))
+            fig2.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=0, r=0, t=10, b=0),
+                showlegend=False,
+                height=250,
             )
+            st.plotly_chart(fig2, use_container_width=True)
 
-    st.divider()
+        with col_list:
+            total_mes = por_cat.sum()
+            for cat, importe in por_cat.items():
+                pct = round(importe / total_mes * 100) if total_mes > 0 else 0
+                color = CAT_COLORS.get(cat, COLORS["neutral"])
+                st.markdown(
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'margin-bottom:2px;">'
+                    f'<span style="font-size:13px;">● {cat}</span>'
+                    f'<span style="font-size:13px;font-weight:500;">{importe:,.2f} €</span>'
+                    f'</div>'
+                    f'<div style="background:#f0efec;border-radius:4px;height:4px;'
+                    f'margin-bottom:10px;">'
+                    f'<div style="background:{color};height:4px;border-radius:4px;'
+                    f'width:{pct}%;"></div></div>',
+                    unsafe_allow_html=True,
+                )
 
-    # Editor de categorías
+        st.divider()
+
+    # Editor de categorías (siempre visible)
     with st.expander("Editar categorías"):
         st.caption("Puedes renombrar o eliminar categorías, y añadir nuevas.")
 

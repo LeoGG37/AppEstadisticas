@@ -1,4 +1,7 @@
+import threading
 import time
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 import pandas as pd
@@ -130,38 +133,63 @@ def _empty_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
 
 
-@st.cache_data(ttl=86400)
-def load_data(account_uids: tuple) -> pd.DataFrame:
-    """Carga y combina transacciones de las cuentas seleccionadas."""
+# El banco (PSD2) solo permite unas pocas consultas de movimientos al día por cuenta
+CADUCIDAD_DATOS = timedelta(hours=24)   # Cada cuánto se piden datos nuevos
+ESPERA_TRAS_FALLO = timedelta(hours=6)  # Tras un fallo, no reintentar antes de esto
+ZONA_ES = ZoneInfo("Europe/Madrid")     # El servidor de Streamlit Cloud funciona en UTC
+
+
+@st.cache_resource
+def _almacen() -> tuple:
+    """Memoria compartida del servidor: {uid: {"raw", "obtenido", "ultimo_intento"}}.
+
+    Sobrevive a recargas de página y a varias pestañas abiertas, pero se pierde
+    si la app se reinicia (push o inactividad). El lock evita llamadas duplicadas.
+    """
+    return {}, threading.Lock()
+
+
+def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
+    """Devuelve (transacciones, cuentas sin actualizar).
+
+    Cuenta por cuenta: si sus datos tienen más de 24 h se piden al banco; si la
+    llamada falla se conservan los últimos datos buenos. Las cuentas sin
+    actualizar se devuelven como [(uid, fecha_de_sus_datos_o_None)].
+    """
     if not account_uids:
-        return _empty_df()
-    try:
-        cfg = st.secrets.get("enable_banking", {})
-        app_id = cfg.get("application_id")
-        private_key = cfg.get("private_key")
+        return _empty_df(), []
 
-        if not all([app_id, private_key]):
-            return _empty_df()
+    almacen, bloqueo = _almacen()
+    sin_actualizar = []
+    with bloqueo:
+        llamadas = 0
+        for uid in account_uids:
+            entrada = almacen.setdefault(uid, {"raw": None, "obtenido": None, "ultimo_intento": None})
+            ahora = datetime.now(timezone.utc)
+            caducado = entrada["obtenido"] is None or ahora - entrada["obtenido"] > CADUCIDAD_DATOS
+            en_espera = (
+                entrada["ultimo_intento"] is not None
+                and ahora - entrada["ultimo_intento"] < ESPERA_TRAS_FALLO
+            )
+            if caducado and _eb_app_id and _eb_key and (forzar or not en_espera):
+                if llamadas > 0:
+                    time.sleep(2.0)  # Pausa entre cuentas para no saturar la API
+                llamadas += 1
+                entrada["ultimo_intento"] = ahora
+                try:
+                    import enable_banking as eb
+                    date_from = (date.today() - timedelta(days=180)).isoformat()
+                    entrada["raw"] = eb.get_transactions(_eb_app_id, _eb_key, uid, date_from=date_from)
+                    entrada["obtenido"] = ahora
+                except Exception:
+                    pass  # 429 u otro error: se quedan los datos anteriores
 
-        import enable_banking as eb
-        from datetime import date, timedelta
-        date_from = (date.today() - timedelta(days=180)).isoformat()
+            if entrada["obtenido"] is None or ahora - entrada["obtenido"] > CADUCIDAD_DATOS:
+                sin_actualizar.append((uid, entrada["obtenido"]))
 
-        all_raw = []
-        for i, uid in enumerate(account_uids):
-            if i > 0:
-                time.sleep(2.0)  # Pausa entre cuentas para no saturar la API
-            try:
-                raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
-                all_raw.extend(raw)
-            except Exception:
-                pass  # Si falla (429 u otro error), seguimos con la siguiente cuenta
-        if not all_raw:
-            return _empty_df()
-        return parse_eb_transactions(all_raw)
-    except Exception:
-        pass
-    return _empty_df()
+        raw_total = [t for uid in account_uids for t in (almacen[uid]["raw"] or [])]
+
+    return parse_eb_transactions(raw_total), sin_actualizar
 
 # --- Categorías en session_state (persisten durante la sesión) ---
 if "categorias" not in st.session_state:
@@ -209,7 +237,22 @@ elif _eb_account_uids:
 else:
     _selected_uids = ()
 
-df = load_data(_selected_uids)
+df, _sin_actualizar = load_data(_selected_uids, forzar=st.session_state.pop("forzar_recarga", False))
+
+# Aviso cuando alguna cuenta muestra datos antiguos o aún no tiene datos
+if _sin_actualizar:
+    _etiquetas = (
+        {a["uid"]: a["label"] for a in _accounts}
+        or {uid: f"Cuenta {i + 1}" for i, uid in enumerate(_eb_account_uids)}
+    )
+    _partes = []
+    for _uid, _obtenido in _sin_actualizar:
+        _nombre = _etiquetas.get(_uid, _uid[:8])
+        if _obtenido:
+            _partes.append(f"{_nombre} (datos del {_obtenido.astimezone(ZONA_ES):%d/%m a las %H:%M})")
+        else:
+            _partes.append(f"{_nombre} (sin datos todavía)")
+    st.caption("⚠️ No se pudieron actualizar: " + ", ".join(_partes))
 
 # Aplicar clasificaciones manuales al DataFrame
 for desc, cat in st.session_state.clasificaciones_manuales.items():
@@ -657,7 +700,8 @@ with tab5:
         btn_reload = col_d2.button("Forzar recarga de datos")
 
         if btn_reload:
-            load_data.clear()
+            # Se salta la espera de 6 h tras un fallo; los datos buenos se conservan si vuelve a fallar
+            st.session_state["forzar_recarga"] = True
             st.session_state.pop("account_list", None)
             st.rerun()
 
@@ -686,14 +730,14 @@ with tab5:
             else:
                 st.warning("No hay session_id configurado.")
 
-            # 2) Transacciones: solo mostramos lo que hay en caché
+            # 2) Transacciones: solo mostramos lo que hay guardado (sin llamar al banco)
             if _eb_account_uids:
                 n_txns = len(df)
                 if n_txns > 0:
-                    st.success(f"Datos en caché — {n_txns} transacción(es)")
+                    st.success(f"Datos guardados — {n_txns} transacción(es)")
                 else:
                     st.warning(
-                        "Sin datos en caché. El límite de llamadas lo impone el banco (PSD2). "
+                        "Sin datos guardados. El límite de llamadas lo impone el banco (PSD2). "
                         "Espera unas horas y pulsa **Forzar recarga de datos**."
                     )
             else:

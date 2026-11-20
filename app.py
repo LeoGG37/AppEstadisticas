@@ -1,3 +1,5 @@
+import time
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -128,7 +130,7 @@ def _empty_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=86400)
 def load_data(account_uids: tuple) -> pd.DataFrame:
     """Carga y combina transacciones de las cuentas seleccionadas."""
     if not account_uids:
@@ -145,7 +147,6 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
         from datetime import date, timedelta
         date_from = (date.today() - timedelta(days=180)).isoformat()
 
-        import time
         all_raw = []
         for i, uid in enumerate(account_uids):
             if i > 0:
@@ -358,45 +359,46 @@ with tab1:
 # ═══════════════════════════════════════════════
 with tab2:
     resumen = monthly_summary(df)
-    etiquetas = [str(m) for m in resumen.index]
 
-    colores_gastos = [
-        COLORS["balance_neg"] if d else COLORS["expense"]
-        for d in resumen["deficit"]
-    ]
+    if resumen.empty:
+        st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
+    else:
+        etiquetas = [str(m) for m in resumen.index]
+        colores_gastos = [
+            COLORS["balance_neg"] if d else COLORS["expense"]
+            for d in resumen["deficit"]
+        ]
 
-    fig = go.Figure()
-    fig.add_bar(
-        name="Ingresos",
-        x=etiquetas,
-        y=resumen["ingresos"],
-        marker_color=COLORS["income"],
-        hovertemplate="%{x}<br>Ingresos: %{y:,.0f} €<extra></extra>",
-    )
-    fig.add_bar(
-        name="Gastos",
-        x=etiquetas,
-        y=resumen["gastos"],
-        marker_color=colores_gastos,
-        hovertemplate="%{x}<br>Gastos: %{y:,.0f} €<extra></extra>",
-    )
-    fig.update_layout(
-        barmode="group",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=0, r=0, t=40, b=0),
-        yaxis=dict(ticksuffix=" €", gridcolor="#e8e8e8"),
-        xaxis=dict(gridcolor="rgba(0,0,0,0)"),
-        font=dict(family="sans-serif", color="#52514e"),
-        height=300,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        fig = go.Figure()
+        fig.add_bar(
+            name="Ingresos",
+            x=etiquetas,
+            y=resumen["ingresos"],
+            marker_color=COLORS["income"],
+            hovertemplate="%{x}<br>Ingresos: %{y:,.0f} €<extra></extra>",
+        )
+        fig.add_bar(
+            name="Gastos",
+            x=etiquetas,
+            y=resumen["gastos"],
+            marker_color=colores_gastos,
+            hovertemplate="%{x}<br>Gastos: %{y:,.0f} €<extra></extra>",
+        )
+        fig.update_layout(
+            barmode="group",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=0, r=0, t=40, b=0),
+            yaxis=dict(ticksuffix=" €", gridcolor="#e8e8e8"),
+            xaxis=dict(gridcolor="rgba(0,0,0,0)"),
+            font=dict(family="sans-serif", color="#52514e"),
+            height=300,
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
+        st.divider()
 
-    # Métricas de resumen
-    if not resumen.empty:
         mejor_mes = resumen["balance"].idxmax()
         meses_deficit = resumen["deficit"].sum()
         ahorro_total = resumen[resumen["balance"] > 0]["balance"].sum()
@@ -691,8 +693,8 @@ with tab5:
                     st.success(f"Datos en caché — {n_txns} transacción(es)")
                 else:
                     st.warning(
-                        "Sin datos en caché. Enable Banking limita las llamadas por cuenta — "
-                        "espera 1-2 minutos y pulsa **Forzar recarga de datos**."
+                        "Sin datos en caché. El límite de llamadas lo impone el banco (PSD2). "
+                        "Espera unas horas y pulsa **Forzar recarga de datos**."
                     )
             else:
                 st.warning("No hay account_uid configurado.")

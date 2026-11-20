@@ -165,6 +165,7 @@ _oauth_code = st.query_params.get("code")
 _accounts = _get_account_list()
 
 if len(_accounts) > 1:
+    # Sesión activa: etiquetas con nombre del tipo de cuenta
     _uid_map = {a["uid"]: a["label"] for a in _accounts}
     _selected = st.multiselect(
         "Cuentas",
@@ -176,8 +177,18 @@ if len(_accounts) > 1:
     _selected_uids = tuple(_selected) if _selected else tuple(_uid_map.keys())
 elif _accounts:
     _selected_uids = (_accounts[0]["uid"],)
+elif len(_eb_account_uids) > 1:
+    # Sin sesión pero hay múltiples UIDs en secrets: selector con etiquetas genéricas
+    _uid_map = {uid: f"Cuenta {i + 1}" for i, uid in enumerate(_eb_account_uids)}
+    _selected = st.multiselect(
+        "Cuentas",
+        options=list(_uid_map.keys()),
+        default=list(_uid_map.keys()),
+        format_func=lambda uid: _uid_map.get(uid, uid[:8]),
+        label_visibility="collapsed",
+    )
+    _selected_uids = tuple(_selected) if _selected else tuple(_eb_account_uids)
 elif _eb_account_uids:
-    # Fallback: UIDs guardados en secrets (sin sesión activa)
     _selected_uids = tuple(_eb_account_uids)
 else:
     _selected_uids = ()

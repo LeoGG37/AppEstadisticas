@@ -3,7 +3,6 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from data import (
-    get_transactions,
     parse_eb_transactions,
     monthly_summary,
     COLORS,

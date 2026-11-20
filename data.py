@@ -1,7 +1,3 @@
-import calendar
-import random
-from datetime import date
-
 import pandas as pd
 
 # --- Paleta de colores (tema azul aprobado) ---
@@ -89,81 +85,6 @@ def is_income(description: str) -> bool:
     return any(kw in d for kw in INCOME_KEYWORDS)
 
 
-def _make_transactions() -> pd.DataFrame:
-    rng = random.Random(42)
-    rows = []
-    today = date(2026, 11, 20)
-
-    # Gastos y cobros que se repiten cada mes en día fijo
-    recurrentes = [
-        {"desc": "Nómina Empresa",  "monto":  2800.00, "dia": 14, "cat": "Ingreso",   "tipo": "ingreso"},
-        {"desc": "MyInvestor",      "monto":  -300.00, "dia": 14, "cat": "Inversión", "tipo": "gasto"},
-        {"desc": "Seguro médico",   "monto":   -45.00, "dia":  1, "cat": "Servicios", "tipo": "gasto"},
-        {"desc": "Iberdrola",       "monto":   -65.00, "dia": 10, "cat": "Servicios", "tipo": "gasto"},
-        {"desc": "Vodafone",        "monto":   -35.00, "dia": 20, "cat": "Servicios", "tipo": "gasto"},
-        {"desc": "Netflix",         "monto":   -17.99, "dia": 15, "cat": "Servicios", "tipo": "gasto"},
-        {"desc": "Spotify",         "monto":   -10.99, "dia":  7, "cat": "Servicios", "tipo": "gasto"},
-    ]
-
-    # Gastos variables que aparecen N veces al mes con importes aleatorios
-    variables = [
-        {"desc": "Mercadona",       "rango": (-95, -55),  "veces": (3, 5), "cat": "Alimentación"},
-        {"desc": "Carrefour",       "rango": (-60, -30),  "veces": (1, 2), "cat": "Alimentación"},
-        {"desc": "Repsol",          "rango": (-90, -55),  "veces": (2, 3), "cat": "Transporte"},
-        {"desc": "Restaurante",     "rango": (-55, -20),  "veces": (2, 5), "cat": "Ocio"},
-        {"desc": "Bar Cafetería",   "rango": (-12,  -3),  "veces": (4, 8), "cat": "Ocio"},
-        {"desc": "Amazon",          "rango": (-120, -20), "veces": (1, 3), "cat": "Ocio"},
-        {"desc": "Farmacia",        "rango": (-45, -15),  "veces": (1, 3), "cat": "Salud"},
-        {"desc": "Zara",            "rango": (-90, -30),  "veces": (0, 2), "cat": "Ropa"},
-        {"desc": "El Corte Inglés", "rango": (-130, -40), "veces": (0, 1), "cat": "Ropa"},
-    ]
-
-    # 6 meses; factor > 1 simula más gasto en vacaciones
-    meses = [
-        (2026, 6,  1.0),
-        (2026, 7,  1.0),
-        (2026, 8,  1.5),   # agosto: vacaciones
-        (2026, 9,  1.6),   # septiembre: vuelta al cole
-        (2026, 10, 0.95),
-        (2026, 11, 1.0),
-    ]
-
-    for year, month, factor in meses:
-        last_day = calendar.monthrange(year, month)[1]
-        # Noviembre solo hasta hoy
-        if year == today.year and month == today.month:
-            last_day = today.day
-
-        for r in recurrentes:
-            if r["dia"] <= last_day:
-                rows.append({
-                    "fecha":       date(year, month, r["dia"]),
-                    "monto":       r["monto"],
-                    "descripcion": r["desc"],
-                    "categoria":   r["cat"],
-                    "recurrente":  True,
-                    "tipo":        r["tipo"],
-                })
-
-        for v in variables:
-            n = rng.randint(v["veces"][0], v["veces"][1])
-            for _ in range(n):
-                dia = rng.randint(1, last_day)
-                monto = round(rng.uniform(v["rango"][0], v["rango"][1]) * factor, 2)
-                rows.append({
-                    "fecha":       date(year, month, dia),
-                    "monto":       monto,
-                    "descripcion": v["desc"],
-                    "categoria":   v["cat"],
-                    "recurrente":  False,
-                    "tipo":        "gasto",
-                })
-
-    df = pd.DataFrame(rows)
-    df["fecha"] = pd.to_datetime(df["fecha"])
-    df["mes"] = df["fecha"].dt.to_period("M")
-    return df.sort_values("fecha", ascending=False).reset_index(drop=True)
-
 
 def parse_eb_transactions(raw: list) -> pd.DataFrame:
     """Convierte la respuesta de Enable Banking al DataFrame interno."""
@@ -220,10 +141,6 @@ def parse_eb_transactions(raw: list) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["mes"] = df["fecha"].dt.to_period("M")
     return df.sort_values("fecha", ascending=False).reset_index(drop=True)
-
-
-def get_transactions() -> pd.DataFrame:
-    return _make_transactions()
 
 
 def monthly_summary(df: pd.DataFrame) -> pd.DataFrame:

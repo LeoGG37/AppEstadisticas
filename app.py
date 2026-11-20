@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 
 from data import (
     get_transactions,
+    parse_eb_transactions,
     monthly_summary,
     COLORS,
     CAT_COLORS,
@@ -68,6 +69,29 @@ footer {visibility: hidden;}
 # --- Carga de datos (cacheada 5 min) ---
 @st.cache_data(ttl=300)
 def load_data():
+    # Intentar con Enable Banking si hay sesión activa
+    try:
+        cfg = st.secrets.get("enable_banking", {})
+        app_id = cfg.get("application_id")
+        private_key = cfg.get("private_key")
+        # session_id y account_uid pueden estar en [enable_banking] o al nivel raíz
+        session_id = cfg.get("session_id") or st.secrets.get("session_id")
+        account_uid = cfg.get("account_uid") or st.secrets.get("account_uid")
+
+        if all([app_id, private_key, session_id, account_uid]):
+            import enable_banking as eb
+            from datetime import date, timedelta
+
+            print(f"[Enable Banking] Conectando con account_uid={account_uid[:8]}...")
+            date_from = (date.today() - timedelta(days=180)).isoformat()
+            raw = eb.get_transactions(app_id, private_key, account_uid, date_from=date_from)
+            print(f"[Enable Banking] Transacciones recibidas: {len(raw)}")
+            return parse_eb_transactions(raw)
+        else:
+            print(f"[Enable Banking] Credenciales incompletas: app_id={bool(app_id)} key={bool(private_key)} session={bool(session_id)} account={bool(account_uid)}")
+    except Exception as e:
+        print(f"[Enable Banking] Error: {e}")  # visible en el terminal
+
     return get_transactions()
 
 df = load_data()
@@ -87,8 +111,31 @@ for desc, cat in st.session_state.clasificaciones_manuales.items():
 # --- Título ---
 st.title("Mis Gastos")
 
+# --- Detectar callback OAuth (Santander redirige con ?code=...) ---
+_oauth_code = st.query_params.get("code")
+
+
+def _mostrar_enlace_auth(app_id, private_key):
+    """Genera y muestra el enlace de autorización de Santander."""
+    REDIRECT_URL = "https://appestadisticas-zapp2pp7lgzrnzsxvp2qdth.streamlit.app"
+    try:
+        import enable_banking as eb
+        auth_data = eb.start_auth(app_id, private_key, REDIRECT_URL, "Santander", "ES")
+        auth_url = auth_data.get("url")
+        if auth_url:
+            st.markdown(
+                "**Pulsa el enlace para autorizar el acceso en Santander:**\n\n"
+                f"[Ir a Santander para autorizar]({auth_url})"
+            )
+            st.caption("Después de autorizar, serás redirigido aquí automáticamente.")
+        else:
+            st.error("No se pudo obtener la URL de autorización.")
+    except Exception as e:
+        st.error(f"Error al iniciar autorización: {e}")
+
+
 # --- Tabs principales ---
-tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Histórico", "Categorías", "Transacciones"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dashboard", "Histórico", "Categorías", "Transacciones", "Conexión"])
 
 
 # ═══════════════════════════════════════════════
@@ -383,3 +430,71 @@ with tab4:
 
     if len(df_t) > 100:
         st.caption(f"Mostrando 100 de {len(df_t)} transacciones. Usa los filtros para acotar.")
+
+
+# ═══════════════════════════════════════════════
+# TAB 5 — CONEXIÓN BANCARIA
+# ═══════════════════════════════════════════════
+with tab5:
+    st.markdown("### Conexión con Santander")
+
+    cfg = st.secrets.get("enable_banking", {})
+    app_id = cfg.get("application_id")
+    private_key = cfg.get("private_key")
+    session_id = cfg.get("session_id") or st.secrets.get("session_id")
+    account_uid = cfg.get("account_uid") or st.secrets.get("account_uid")
+
+    # --- Callback OAuth: Santander ha redirigido con ?code=... ---
+    if _oauth_code:
+        st.info("Código de autorización recibido. Obteniendo sesión...")
+        try:
+            import enable_banking as eb
+            session_data = eb.exchange_code(app_id, private_key, _oauth_code)
+            new_session_id = session_data["session_id"]
+            accounts = session_data.get("accounts", [])
+            new_account_uid = accounts[0]["uid"] if accounts else None
+
+            if new_session_id and new_account_uid:
+                st.success("¡Autorización completada!")
+                st.markdown("**Copia estos valores en los Secrets de Streamlit Cloud:**")
+                st.code(
+                    f'[enable_banking]\n'
+                    f'application_id = "{app_id}"\n'
+                    f'session_id = "{new_session_id}"\n'
+                    f'account_uid = "{new_account_uid}"',
+                    language="toml",
+                )
+                st.markdown(
+                    "Ve a **Streamlit Cloud → tu app → Settings → Secrets** "
+                    "y añade `session_id` y `account_uid` dentro de `[enable_banking]`."
+                )
+                # Limpiar el parámetro de la URL
+                if st.button("Listo, limpiar URL"):
+                    st.query_params.clear()
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.error("No se encontraron cuentas en la sesión.")
+        except Exception as e:
+            st.error(f"Error al obtener sesión: {e}")
+
+    # --- Estado actual de la conexión ---
+    elif session_id and account_uid:
+        st.success("Banco conectado")
+        st.caption(f"Session activa · account_uid: `{account_uid[:8]}...`")
+        if st.button("Renovar conexión (nueva autorización)"):
+            st.session_state["iniciar_auth"] = True
+            st.rerun()
+
+        if st.session_state.get("iniciar_auth"):
+            _mostrar_enlace_auth(app_id, private_key)
+
+    # --- Sin sesión: botón para iniciar autorización ---
+    else:
+        st.warning("No hay banco conectado.")
+        if st.button("Conectar Santander"):
+            st.session_state["iniciar_auth"] = True
+            st.rerun()
+
+        if st.session_state.get("iniciar_auth"):
+            _mostrar_enlace_auth(app_id, private_key)

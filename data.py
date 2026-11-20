@@ -165,11 +165,64 @@ def _make_transactions() -> pd.DataFrame:
     return df.sort_values("fecha", ascending=False).reset_index(drop=True)
 
 
+def parse_eb_transactions(raw: list) -> pd.DataFrame:
+    """Convierte la respuesta de Enable Banking al DataFrame interno."""
+    rows = []
+    for t in raw:
+        try:
+            amount = float(t["transaction_amount"]["amount"])
+        except (KeyError, ValueError):
+            continue
+
+        indicator = t.get("credit_debit_indicator", "DBIT")
+        if indicator == "CRDT":
+            tipo = "ingreso"
+            monto = abs(amount)
+        else:
+            tipo = "gasto"
+            monto = -abs(amount)
+
+        # Descripción: varios campos posibles según el banco
+        desc = (
+            (t.get("creditor") or {}).get("name")
+            or (t.get("debtor") or {}).get("name")
+            or ((t.get("remittance_information") or [""])[0])
+            or t.get("entry_reference")
+            or "Sin descripción"
+        )
+        desc = str(desc).strip()
+
+        # Si la descripción sugiere ingreso aunque sea DBIT, corregir tipo
+        if is_income(desc):
+            tipo = "ingreso"
+            monto = abs(amount)
+
+        fecha_str = (
+            t.get("booking_date")
+            or t.get("value_date")
+            or t.get("transaction_date")
+        )
+        if not fecha_str:
+            continue
+
+        rows.append({
+            "fecha":       pd.to_datetime(fecha_str),
+            "monto":       monto,
+            "descripcion": desc,
+            "categoria":   categorize(desc) if tipo == "gasto" else "Ingreso",
+            "recurrente":  False,
+            "tipo":        tipo,
+        })
+
+    if not rows:
+        return _make_transactions()
+
+    df = pd.DataFrame(rows)
+    df["mes"] = df["fecha"].dt.to_period("M")
+    return df.sort_values("fecha", ascending=False).reset_index(drop=True)
+
+
 def get_transactions() -> pd.DataFrame:
-    # TODO: cuando tengas las credenciales de Enable Banking, sustituye esta
-    # línea por la llamada real a la API:
-    #   from enable_banking import fetch_transactions
-    #   return fetch_transactions(st.secrets["enable_banking"])
     return _make_transactions()
 
 

@@ -631,3 +631,33 @@ with tab5:
             st.rerun()
         if st.session_state.get("iniciar_auth"):
             _mostrar_enlace_auth(app_id, private_key)
+
+    # --- Diagnóstico ---
+    with st.expander("🔍 Diagnóstico de conexión"):
+        if st.button("Probar conexión ahora"):
+            import enable_banking as eb
+            # 1) Sesión
+            if session_id:
+                try:
+                    status = eb.get_session_status(app_id, private_key, session_id)
+                    n = len(status.get("accounts", []))
+                    st.success(f"Sesión válida — {n} cuenta(s) encontrada(s)")
+                except Exception as e:
+                    st.error(f"Sesión inválida: {e}")
+            else:
+                st.warning("No hay session_id configurado.")
+
+            # 2) Transacciones de la primera cuenta
+            uid_prueba = (_eb_account_uids or [None])[0]
+            if uid_prueba:
+                try:
+                    from datetime import date, timedelta
+                    txns = eb.get_transactions(
+                        app_id, private_key, uid_prueba,
+                        date_from=(date.today() - timedelta(days=7)).isoformat(),
+                    )
+                    st.success(f"Transacciones OK — {len(txns)} movimiento(s) en los últimos 7 días")
+                except Exception as e:
+                    st.error(f"Error al obtener transacciones: {e}")
+            else:
+                st.warning("No hay account_uid configurado.")

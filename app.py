@@ -128,7 +128,7 @@ def _empty_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def load_data(account_uids: tuple) -> pd.DataFrame:
     """Carga y combina transacciones de las cuentas seleccionadas."""
     if not account_uids:
@@ -158,7 +158,7 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
                     break
                 except Exception as e:
                     if "429" in str(e) and intento < 2:
-                        time.sleep(3 * (2 ** intento))  # 3s, 6s
+                        time.sleep(10 * (intento + 1))  # 10s, 20s
                     else:
                         break
         if not all_raw:
@@ -690,22 +690,15 @@ with tab5:
             else:
                 st.warning("No hay session_id configurado.")
 
-            # 2) Transacciones
+            # 2) Transacciones: solo mostramos lo que hay en caché
             if _eb_account_uids:
                 n_txns = len(df)
                 if n_txns > 0:
                     st.success(f"Datos en caché — {n_txns} transacción(es)")
                 else:
-                    # Intentar una llamada mínima para ver el error real
-                    st.warning("Sin datos en caché. Probando conexión de transacciones...")
-                    try:
-                        from datetime import date, timedelta
-                        txns = eb.get_transactions(
-                            app_id, private_key, _eb_account_uids[0],
-                            date_from=(date.today() - timedelta(days=1)).isoformat(),
-                        )
-                        st.info(f"API responde: {len(txns)} movimiento(s) ayer. Pulsa **Forzar recarga** para cargar los datos.")
-                    except Exception as e:
-                        st.error(f"Error al obtener transacciones: {e}")
+                    st.warning(
+                        "Sin datos en caché. Enable Banking limita las llamadas por cuenta — "
+                        "espera 1-2 minutos y pulsa **Forzar recarga de datos**."
+                    )
             else:
                 st.warning("No hay account_uid configurado.")

@@ -73,9 +73,19 @@ try:
     _eb_key     = _eb_cfg.get("private_key")
     _eb_session = _eb_cfg.get("session_id") or st.secrets.get("session_id")
     _eb_account = _eb_cfg.get("account_uid") or st.secrets.get("account_uid")
+
+    # Leer UIDs múltiples (account_uid_1, account_uid_2, ...): se guardan tras el OAuth
+    _eb_account_uids: list = []
+    if _eb_account:
+        _eb_account_uids.append(_eb_account)
+    for _i in range(1, 10):
+        _uid = _eb_cfg.get(f"account_uid_{_i}") or st.secrets.get(f"account_uid_{_i}")
+        if _uid and _uid not in _eb_account_uids:
+            _eb_account_uids.append(_uid)
 except Exception:
     _eb_cfg = {}
     _eb_app_id = _eb_key = _eb_session = _eb_account = None
+    _eb_account_uids = []
 
 
 def _get_account_list() -> list:
@@ -164,8 +174,9 @@ if len(_accounts) > 1:
     _selected_uids = tuple(_selected) if _selected else tuple(_uid_map.keys())
 elif _accounts:
     _selected_uids = (_accounts[0]["uid"],)
-elif _eb_account:
-    _selected_uids = (_eb_account,)
+elif _eb_account_uids:
+    # Fallback: UIDs guardados en secrets (sin sesión activa)
+    _selected_uids = tuple(_eb_account_uids)
 else:
     _selected_uids = ()
 
@@ -521,46 +532,67 @@ with tab5:
 
     # --- Callback OAuth: Santander ha redirigido con ?code=... ---
     if _oauth_code:
-        received_state = st.query_params.get("state", "")
-        expected_state = st.session_state.get("oauth_state", "")
-        if expected_state and received_state != expected_state:
-            st.error("Estado OAuth inválido. Vuelve a intentar la conexión.")
+        # Protección contra doble-consumo del código (Streamlit re-ejecuta el script)
+        _code_key = f"eb_code_{abs(hash(_oauth_code)) % 1_000_000}"
+        if st.session_state.get(_code_key):
+            # Ya procesado en este render; limpiar URL y esperar el rerun
+            st.query_params.clear()
         else:
-            st.info("Código de autorización recibido. Obteniendo sesión...")
-            try:
-                import enable_banking as eb
-                session_data = eb.exchange_code(app_id, private_key, _oauth_code)
-                new_session_id = session_data["session_id"]
-                accounts = session_data.get("accounts", [])
-                new_account_uid = accounts[0]["uid"] if accounts else None
+            st.session_state[_code_key] = True
+            received_state = st.query_params.get("state", "")
+            expected_state = st.session_state.get("oauth_state", "")
+            if expected_state and received_state != expected_state:
+                st.error("Estado OAuth inválido. Vuelve a intentar la conexión.")
+                st.query_params.clear()
+            else:
+                st.info("Código de autorización recibido. Obteniendo sesión...")
+                try:
+                    import enable_banking as eb
+                    session_data = eb.exchange_code(app_id, private_key, _oauth_code)
+                    new_session_id = session_data["session_id"]
+                    accounts = session_data.get("accounts", [])
 
-                if new_session_id and new_account_uid:
-                    st.session_state["new_credentials"] = {
-                        "session_id": new_session_id,
-                        "account_uid": new_account_uid,
-                    }
+                    if new_session_id and accounts:
+                        st.session_state["new_credentials"] = {
+                            "session_id": new_session_id,
+                            "accounts": accounts,
+                        }
+                        st.query_params.clear()
+                        st.session_state.pop("oauth_state", None)
+                        st.session_state.pop("auth_url", None)
+                        st.session_state.pop("account_list", None)
+                        st.rerun()
+                    else:
+                        st.error("No se encontraron cuentas en la sesión.")
+                        st.query_params.clear()
+                except Exception as e:
+                    st.error(f"Error al obtener sesión: {e}")
                     st.query_params.clear()
-                    st.session_state.pop("oauth_state", None)
-                    st.session_state.pop("auth_url", None)
-                    st.rerun()
-                else:
-                    st.error("No se encontraron cuentas en la sesión.")
-            except Exception as e:
-                st.error(f"Error al obtener sesión: {e}")
 
     # --- Credenciales recién obtenidas (tras limpiar la URL) ---
     elif st.session_state.get("new_credentials"):
         creds = st.session_state["new_credentials"]
+        accounts = creds.get("accounts", [])
         st.success("¡Autorización completada!")
         st.markdown("**Copia estos valores en los Secrets de Streamlit Cloud (dentro de `[enable_banking]`):**")
-        st.code(
-            f'session_id = "{creds["session_id"]}"\n'
-            f'account_uid = "{creds["account_uid"]}"',
-            language="toml",
-        )
+
+        # Construir bloque TOML con session_id + un account_uid por cuenta
+        lines = [f'session_id = "{creds["session_id"]}"']
+        for i, acc in enumerate(accounts):
+            uid = acc.get("uid", "")
+            tipo = acc.get("account_type") or acc.get("name") or f"Cuenta {i + 1}"
+            suffix = f"_{i + 1}" if len(accounts) > 1 else ""
+            lines.append(f'# {tipo}')
+            lines.append(f'account_uid{suffix} = "{uid}"')
+
+        st.code("\n".join(lines), language="toml")
         st.markdown(
             "Ve a **Streamlit Cloud → tu app → Settings → Secrets** "
-            "y añade estos dos valores dentro de `[enable_banking]`."
+            "y añade estos valores dentro de `[enable_banking]`."
+        )
+        st.caption(
+            "💡 Los `account_uid` son permanentes — no cambian aunque renueves la conexión. "
+            "Solo necesitarás actualizar `session_id` cada ~180 días."
         )
         if st.button("Listo"):
             st.session_state.pop("new_credentials", None)

@@ -145,6 +145,8 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
                 all_raw.extend(raw)
             except Exception:
                 pass  # Esta cuenta no devuelve datos; seguimos con las demás
+        if not all_raw:
+            return _empty_df()
         return parse_eb_transactions(all_raw)
     except Exception:
         pass

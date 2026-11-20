@@ -215,7 +215,7 @@ def parse_eb_transactions(raw: list) -> pd.DataFrame:
         })
 
     if not rows:
-        return _make_transactions()
+        return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
 
     df = pd.DataFrame(rows)
     df["mes"] = df["fecha"].dt.to_period("M")

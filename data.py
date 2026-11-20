@@ -85,14 +85,13 @@ def is_income(description: str) -> bool:
     return any(kw in d for kw in INCOME_KEYWORDS)
 
 
-
 def parse_eb_transactions(raw: list) -> pd.DataFrame:
     """Convierte la respuesta de Enable Banking al DataFrame interno."""
     rows = []
     for t in raw:
         try:
             amount = float(t["transaction_amount"]["amount"])
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue
 
         indicator = t.get("credit_debit_indicator", "DBIT")
@@ -148,6 +147,9 @@ def monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
     gastos   = df[df["tipo"] == "gasto"].groupby("mes")["monto"].sum().abs()
     resumen  = pd.DataFrame({"ingresos": ingresos, "gastos": gastos}).fillna(0)
     resumen["balance"]    = resumen["ingresos"] - resumen["gastos"]
-    resumen["ahorro_pct"] = (resumen["balance"] / resumen["ingresos"] * 100).round(1)
+    resumen["ahorro_pct"] = resumen.apply(
+        lambda r: round(r["balance"] / r["ingresos"] * 100, 1) if r["ingresos"] > 0 else 0.0,
+        axis=1,
+    )
     resumen["deficit"]    = resumen["balance"] < 0
     return resumen.sort_index()

@@ -109,7 +109,10 @@ def _get_account_list() -> list:
                 label = f"····{iban[-4:]}"
             else:
                 label = f"Cuenta {i + 1}"
-            result.append({"uid": acc["uid"], "label": label})
+            uid = acc.get("uid", "")
+            if not uid:
+                continue
+            result.append({"uid": uid, "label": label})
         st.session_state["account_list"] = result
         return result
     except Exception:
@@ -298,7 +301,7 @@ with tab1:
         with col_rec:
             st.markdown("**Gastos recurrentes**")
             recurrentes = df_mes[
-                (df_mes["recurrente"] == True) & (df_mes["tipo"] == "gasto")
+                df_mes["recurrente"] & (df_mes["tipo"] == "gasto")
             ][["descripcion", "monto"]].copy()
             recurrentes["monto"] = recurrentes["monto"].abs()
 
@@ -619,7 +622,7 @@ with tab5:
     elif session_id and (account_uid or _eb_account_uids):
         st.success("Banco conectado")
         uid_display = (account_uid or (_eb_account_uids[0] if _eb_account_uids else ""))
-        st.caption(f"Session activa · {len(_eb_account_uids or [account_uid])} cuenta(s) · `{uid_display[:8]}...`")
+        st.caption(f"Sesión activa · {len(_eb_account_uids or [account_uid])} cuenta(s) · `{uid_display[:8]}...`")
         if st.button("Renovar conexión"):
             st.session_state["iniciar_auth"] = True
             st.session_state.pop("auth_url", None)

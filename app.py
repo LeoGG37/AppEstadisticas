@@ -120,7 +120,7 @@ def _mostrar_enlace_auth(app_id, private_key):
     REDIRECT_URL = "https://appestadisticas-zapp2pp7lgzrnzsxvp2qdth.streamlit.app"
     try:
         import enable_banking as eb
-        auth_data = eb.start_auth(app_id, private_key, REDIRECT_URL, "Santander", "ES")
+        auth_data = eb.start_auth(app_id, private_key, REDIRECT_URL, "Banco Santander", "ES")
         auth_url = auth_data.get("url")
         if auth_url:
             st.markdown(

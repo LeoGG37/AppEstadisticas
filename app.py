@@ -1,3 +1,4 @@
+import html
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -41,7 +42,7 @@ def check_password() -> bool:
         st.markdown("### Mis Gastos")
         with st.form("login", clear_on_submit=False):
             pwd = st.text_input("Contraseña", type="password", placeholder="Introduce tu contraseña")
-            submitted = st.form_submit_button("Entrar", use_container_width=True)
+            submitted = st.form_submit_button("Entrar", width="stretch")
         if submitted:
             if pwd == password_correcta:
                 st.session_state["authenticated"] = True
@@ -62,15 +63,50 @@ footer {visibility: hidden;}
 /* Ajustar padding superior */
 .block-container {padding-top: 2rem;}
 
-/* Métricas: texto más compacto */
-[data-testid="stMetricLabel"] p {font-size: 0.8rem; color: #52514e;}
-[data-testid="stMetricValue"] {font-size: 1.5rem; font-weight: 500;}
-[data-testid="stMetricDelta"] {font-size: 0.85rem;}
-
 /* Tabs */
 [data-testid="stTabs"] button {font-size: 0.9rem;}
+
+/* Tarjetas de métricas: en fila en el ordenador, cuadrícula 2×2 en el móvil */
+.metricas {display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 8px 0 4px;}
+.metricas.tres {grid-template-columns: repeat(3, 1fr);}
+.metrica .etq {font-size: 0.8rem; color: #52514e;}
+.metrica .val {font-size: 1.4rem; font-weight: 500; line-height: 1.3;}
+@media (max-width: 640px) {
+    .metricas, .metricas.tres {grid-template-columns: repeat(2, 1fr);}
+    .metrica .val {font-size: 1.2rem;}
+}
+
+/* Filas de listas: nombre a la izquierda e importe a la derecha, siempre en la misma línea */
+.fila {display: flex; justify-content: space-between; align-items: center; gap: 12px;
+       padding: 8px 0; border-bottom: 1px solid #eeede9; font-size: 14px;}
+.fila-izq {min-width: 0; overflow-wrap: anywhere;}
+.fila-der {white-space: nowrap; font-weight: 500;}
+.fila-sub {font-size: 12px; color: #898781;}
+.etiqueta {font-size: 10px; padding: 1px 6px; border-radius: 4px; margin-left: 6px;}
 </style>
 """, unsafe_allow_html=True)
+
+# Gráficos sin barra de herramientas ni zoom: en pantallas táctiles el zoom
+# se activa al deslizar el dedo y bloquea el desplazamiento de la página
+PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": False}
+
+
+def _metricas(items: list, clase: str = "") -> None:
+    """Pinta tarjetas de métricas. items: [(etiqueta, valor, color o None)]."""
+    tarjetas = "".join(
+        f'<div class="metrica"><div class="etq">{etq}</div>'
+        f'<div class="val" style="color:{color or "inherit"}">{val}</div></div>'
+        for etq, val, color in items
+    )
+    st.markdown(f'<div class="metricas {clase}">{tarjetas}</div>', unsafe_allow_html=True)
+
+
+def _fila(izquierda: str, derecha: str, color_derecha: str = "inherit") -> str:
+    """HTML de una fila de lista. Los textos que vengan del banco deben ir escapados."""
+    return (
+        f'<div class="fila"><div class="fila-izq">{izquierda}</div>'
+        f'<div class="fila-der" style="color:{color_derecha}">{derecha}</div></div>'
+    )
 
 # --- Credenciales Enable Banking ---
 try:
@@ -315,35 +351,33 @@ with tab1:
         if len(sin_clasificar) > 0:
             with st.expander(f"⚠️ {len(sin_clasificar)} comercio(s) sin clasificar — pulsa para asignarles una categoría"):
                 for desc in sin_clasificar:
-                    col_desc, col_cat, col_btn = st.columns([3, 2, 1])
-                    col_desc.markdown(f"**{desc}**")
-                    cat_elegida = col_cat.selectbox(
-                        "Categoría",
-                        st.session_state.categorias,
-                        key=f"sc_{desc}",
-                        label_visibility="collapsed",
-                    )
-                    if col_btn.button("Guardar", key=f"btn_{desc}"):
-                        st.session_state.clasificaciones_manuales[desc] = cat_elegida
-                        df.loc[df["descripcion"] == desc, "categoria"] = cat_elegida
-                        st.rerun()
+                    st.markdown(f"**{desc}**")
+                    # Selector y botón en la misma fila, también en el móvil
+                    with st.container(horizontal=True, vertical_alignment="center"):
+                        cat_elegida = st.selectbox(
+                            "Categoría",
+                            st.session_state.categorias,
+                            key=f"sc_{desc}",
+                            label_visibility="collapsed",
+                        )
+                        if st.button("Guardar", key=f"btn_{desc}"):
+                            st.session_state.clasificaciones_manuales[desc] = cat_elegida
+                            df.loc[df["descripcion"] == desc, "categoria"] = cat_elegida
+                            st.rerun()
 
         ingresos  = df_mes[df_mes["tipo"] == "ingreso"]["monto"].sum()
         gastos    = abs(df_mes[df_mes["tipo"] == "gasto"]["monto"].sum())
         balance   = ingresos - gastos
         ahorro    = round((balance / ingresos * 100), 1) if ingresos > 0 else 0.0
 
-        # Tarjetas de métricas
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Ingresos",  f"{ingresos:,.2f} €")
-        c2.metric("Gastos",    f"{gastos:,.2f} €")
-        c3.metric(
-            "Balance",
-            f"{balance:,.2f} €",
-            delta=f"{'↑' if balance >= 0 else '↓'} {abs(balance):,.0f} €",
-            delta_color="normal" if balance >= 0 else "inverse",
-        )
-        c4.metric("Ahorro", f"{ahorro:.1f}%")
+        # Tarjetas de métricas (2×2 en el móvil)
+        _metricas([
+            ("Ingresos", f"{ingresos:,.2f} €", None),
+            ("Gastos",   f"{gastos:,.2f} €",   None),
+            ("Balance",  f"{balance:,.2f} €",
+             COLORS["balance_pos"] if balance >= 0 else COLORS["balance_neg"]),
+            ("Ahorro",   f"{ahorro:.1f}%",     None),
+        ])
 
         st.divider()
 
@@ -360,19 +394,15 @@ with tab1:
             if recurrentes.empty:
                 st.caption("Sin recurrentes este mes.")
             else:
-                for _, row in recurrentes.iterrows():
-                    ca, cb = st.columns([3, 1])
-                    ca.markdown(
-                        f'<span style="background:#E6F1FB;color:#185FA5;'
-                        f'font-size:11px;padding:2px 7px;border-radius:6px;'
-                        f'margin-right:6px;">mensual</span>{row["descripcion"]}',
-                        unsafe_allow_html=True,
+                filas = "".join(
+                    _fila(
+                        f'<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;'
+                        f'margin:0 6px 0 0;">mensual</span>{html.escape(row["descripcion"])}',
+                        f'{row["monto"]:,.2f} €',
                     )
-                    cb.markdown(
-                        f'<p style="text-align:right;font-weight:500;">'
-                        f'{row["monto"]:,.2f} €</p>',
-                        unsafe_allow_html=True,
-                    )
+                    for _, row in recurrentes.iterrows()
+                )
+                st.markdown(filas, unsafe_allow_html=True)
 
         # --- Top 5 comercios ---
         with col_top:
@@ -387,14 +417,11 @@ with tab1:
             if top5.empty:
                 st.caption("Sin datos.")
             else:
-                for i, (nombre, importe) in enumerate(top5.items(), 1):
-                    ca, cb = st.columns([3, 1])
-                    ca.write(f"{i}. {nombre}")
-                    cb.markdown(
-                        f'<p style="text-align:right;font-weight:500;'
-                        f'color:{COLORS["income"]};">{importe:,.2f} €</p>',
-                        unsafe_allow_html=True,
-                    )
+                filas = "".join(
+                    _fila(f"{i}. {html.escape(nombre)}", f"{importe:,.2f} €", COLORS["income"])
+                    for i, (nombre, importe) in enumerate(top5.items(), 1)
+                )
+                st.markdown(filas, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════
@@ -437,8 +464,11 @@ with tab2:
             xaxis=dict(gridcolor="rgba(0,0,0,0)"),
             font=dict(family="sans-serif", color="#52514e"),
             height=300,
+            dragmode=False,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_xaxes(fixedrange=True)
+        fig.update_yaxes(fixedrange=True)
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
         st.divider()
 
@@ -446,10 +476,11 @@ with tab2:
         meses_deficit = resumen["deficit"].sum()
         ahorro_total = resumen[resumen["balance"] > 0]["balance"].sum()
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Mejor mes",        mejor_mes.strftime("%B %Y").capitalize())
-        c2.metric("Meses en déficit", f"{int(meses_deficit)} de {len(resumen)}")
-        c3.metric("Ahorro acumulado", f"{ahorro_total:,.0f} €")
+        _metricas([
+            ("Mejor mes",        mejor_mes.strftime("%B %Y").capitalize(), None),
+            ("Meses en déficit", f"{int(meses_deficit)} de {len(resumen)}", None),
+            ("Ahorro acumulado", f"{ahorro_total:,.0f} €", None),
+        ], clase="tres")
 
 
 # ═══════════════════════════════════════════════
@@ -489,7 +520,7 @@ with tab3:
                 showlegend=False,
                 height=250,
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch", config=PLOTLY_CONFIG)
 
         with col_list:
             total_mes = por_cat.sum()
@@ -499,7 +530,7 @@ with tab3:
                 st.markdown(
                     f'<div style="display:flex;justify-content:space-between;'
                     f'margin-bottom:2px;">'
-                    f'<span style="font-size:13px;">● {cat}</span>'
+                    f'<span style="font-size:13px;">● {html.escape(cat)}</span>'
                     f'<span style="font-size:13px;font-weight:500;">{importe:,.2f} €</span>'
                     f'</div>'
                     f'<div style="background:#f0efec;border-radius:4px;height:4px;'
@@ -523,26 +554,27 @@ with tab3:
             st.rerun()
 
         for i, cat in enumerate(cats):
-            c1, c2, c3 = st.columns([3, 1, 1])
-            nuevo_nombre = c1.text_input(f"cat_{i}", value=cat, label_visibility="collapsed")
-            if nuevo_nombre != cat:
-                st.session_state.categorias[i] = nuevo_nombre
-                st.rerun()
-            if c3.button("✕", key=f"del_{i}", help=f"Eliminar {cat}"):
-                st.session_state.categorias.pop(i)
-                st.rerun()
+            # Nombre y botón de borrar en la misma fila, también en el móvil
+            with st.container(horizontal=True, vertical_alignment="center"):
+                nuevo_nombre = st.text_input(f"cat_{i}", value=cat, label_visibility="collapsed")
+                if nuevo_nombre != cat:
+                    st.session_state.categorias[i] = nuevo_nombre
+                    st.rerun()
+                if st.button("✕", key=f"del_{i}", help=f"Eliminar {cat}"):
+                    st.session_state.categorias.pop(i)
+                    st.rerun()
 
 
 # ═══════════════════════════════════════════════
 # TAB 4 — TRANSACCIONES
 # ═══════════════════════════════════════════════
 with tab4:
-    col_busq, col_cat, col_tipo = st.columns([3, 2, 1])
-
-    busqueda = col_busq.text_input("Buscar", placeholder="Nombre del comercio...", label_visibility="collapsed")
+    busqueda = st.text_input("Buscar", placeholder="Nombre del comercio...", label_visibility="collapsed")
     cats_disponibles = ["Todas"] + sorted(df["categoria"].dropna().unique().tolist())
-    cat_filtro = col_cat.selectbox("Categoría", cats_disponibles, label_visibility="collapsed")
-    tipo_filtro = col_tipo.selectbox("Tipo", ["Todos", "Gasto", "Ingreso"], label_visibility="collapsed")
+    # Los dos filtros comparten fila, también en el móvil
+    with st.container(horizontal=True):
+        cat_filtro = st.selectbox("Categoría", cats_disponibles, label_visibility="collapsed")
+        tipo_filtro = st.selectbox("Tipo", ["Todos", "Gasto", "Ingreso"], label_visibility="collapsed")
 
     df_t = df.copy()
     if busqueda:
@@ -556,37 +588,28 @@ with tab4:
 
     st.caption(f"{len(df_t)} transacciones")
 
+    # Toda la lista en un único bloque HTML: más rápido de pintar en el móvil
+    filas = []
     for _, row in df_t.head(100).iterrows():
         es_ingreso = row["tipo"] == "ingreso"
         color_monto = COLORS["balance_pos"] if es_ingreso else COLORS["balance_neg"]
         signo = "+" if es_ingreso else "−"
-        badge_rec = (
-            '<span style="background:#E6F1FB;color:#185FA5;font-size:10px;'
-            'padding:1px 6px;border-radius:4px;margin-left:6px;">recurrente</span>'
-            if row["recurrente"] else ""
-        )
-        badge_ing = (
-            '<span style="background:#EAF3DE;color:#3B6D11;font-size:10px;'
-            'padding:1px 6px;border-radius:4px;margin-left:6px;">ingreso</span>'
-            if es_ingreso else ""
-        )
+        etiquetas = ""
+        if row["recurrente"]:
+            etiquetas += '<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;">recurrente</span>'
+        if es_ingreso:
+            etiquetas += '<span class="etiqueta" style="background:#EAF3DE;color:#3B6D11;">ingreso</span>'
 
-        ca, cb = st.columns([4, 1])
-        ca.markdown(
-            f'<div style="padding:2px 0;">'
-            f'<span style="font-size:14px;">{row["descripcion"]}'
-            f'{badge_rec}{badge_ing}</span><br>'
-            f'<span style="font-size:12px;color:#898781;">'
-            f'{row["fecha"].strftime("%d %b %Y").lstrip("0")} · {row["categoria"]}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
+        # La descripción viene del banco: se escapa para que no pueda inyectar HTML
+        izquierda = (
+            f'{html.escape(row["descripcion"])}{etiquetas}'
+            f'<div class="fila-sub">{row["fecha"].strftime("%d %b %Y").lstrip("0")}'
+            f' · {html.escape(str(row["categoria"]))}</div>'
         )
-        cb.markdown(
-            f'<p style="text-align:right;font-weight:500;color:{color_monto};'
-            f'margin-top:8px;">{signo}{abs(row["monto"]):,.2f} €</p>',
-            unsafe_allow_html=True,
-        )
-        st.divider()
+        filas.append(_fila(izquierda, f'{signo}{abs(row["monto"]):,.2f} €', color_monto))
+
+    if filas:
+        st.markdown("".join(filas), unsafe_allow_html=True)
 
     if len(df_t) > 100:
         st.caption(f"Mostrando 100 de {len(df_t)} transacciones. Usa los filtros para acotar.")

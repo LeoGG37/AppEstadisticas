@@ -128,7 +128,7 @@ def _empty_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=120)
 def load_data(account_uids: tuple) -> pd.DataFrame:
     """Carga y combina transacciones de las cuentas seleccionadas."""
     if not account_uids:
@@ -149,18 +149,12 @@ def load_data(account_uids: tuple) -> pd.DataFrame:
         all_raw = []
         for i, uid in enumerate(account_uids):
             if i > 0:
-                time.sleep(1.5)  # Pausa entre cuentas para evitar 429
-            # Reintentos con backoff exponencial si hay rate limiting
-            for intento in range(3):
-                try:
-                    raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
-                    all_raw.extend(raw)
-                    break
-                except Exception as e:
-                    if "429" in str(e) and intento < 2:
-                        time.sleep(10 * (intento + 1))  # 10s, 20s
-                    else:
-                        break
+                time.sleep(2.0)  # Pausa entre cuentas para no saturar la API
+            try:
+                raw = eb.get_transactions(app_id, private_key, uid, date_from=date_from)
+                all_raw.extend(raw)
+            except Exception:
+                pass  # Si falla (429 u otro error), seguimos con la siguiente cuenta
         if not all_raw:
             return _empty_df()
         return parse_eb_transactions(all_raw)

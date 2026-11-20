@@ -617,7 +617,8 @@ with tab5:
     # --- Banco ya conectado ---
     elif session_id and (account_uid or _eb_account_uids):
         st.success("Banco conectado")
-        st.caption(f"Session activa · account_uid: `{account_uid[:8]}...`")
+        uid_display = (account_uid or (_eb_account_uids[0] if _eb_account_uids else ""))
+        st.caption(f"Session activa · {len(_eb_account_uids or [account_uid])} cuenta(s) · `{uid_display[:8]}...`")
         if st.button("Renovar conexión"):
             st.session_state["iniciar_auth"] = True
             st.session_state.pop("auth_url", None)

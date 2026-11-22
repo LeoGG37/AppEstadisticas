@@ -27,8 +27,10 @@ from data import (  # noqa: E402
     renombrar_categoria,
     borrar_categoria,
     aplicar_ajustes,
-    exportar_ajustes,
-    importar_ajustes,
+    reducir_movimiento,
+    combinar_historial,
+    exportar_copia,
+    importar_copia,
 )
 
 # --- Configuración de página ---
@@ -219,9 +221,18 @@ ZONA_ES = ZoneInfo("Europe/Madrid")     # El servidor de Streamlit Cloud funcion
 # más devuelve WRONG_TRANSACTIONS_PERIOD. 89 deja un día de margen por la zona horaria.
 DIAS_HISTORIAL = 89
 
-# El primer mes del historial solo trae sus últimos días: se marca para que no confunda
-_inicio_historial = date.today() - timedelta(days=DIAS_HISTORIAL)
-MES_PARCIAL = pd.Period(_inicio_historial, freq="M") if _inicio_historial.day > 1 else None
+# El primer mes del historial puede traer solo sus últimos días: se marca para que no confunda.
+# Se calcula tras cargar los datos, con la fecha real desde la que hay historial.
+MES_PARCIAL = None
+
+
+def _desde_cuenta(entrada: dict) -> str | None:
+    """Fecha (AAAA-MM-DD) desde la que hay historial de una cuenta."""
+    if entrada.get("desde"):
+        return entrada["desde"]
+    if entrada.get("obtenido"):  # Datos guardados antes de llevar la cuenta de "desde"
+        return (entrada["obtenido"].date() - timedelta(days=DIAS_HISTORIAL)).isoformat()
+    return None
 
 
 def _mes(periodo, corto: bool = False) -> str:
@@ -255,7 +266,7 @@ def _motivo_error(e: Exception, uid: str) -> str:
 
 @st.cache_resource
 def _almacen() -> tuple:
-    """Memoria compartida del servidor: {uid: {"raw", "obtenido", "ultimo_intento", "error"}}.
+    """Memoria compartida del servidor: {uid: {"raw", "obtenido", "desde", "ultimo_intento", "error"}}.
 
     Sobrevive a recargas de página y a varias pestañas abiertas, pero se pierde
     si la app se reinicia (push o inactividad). El lock evita llamadas duplicadas.
@@ -279,7 +290,7 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
         llamadas = 0
         for uid in account_uids:
             entrada = almacen.setdefault(
-                uid, {"raw": None, "obtenido": None, "ultimo_intento": None, "error": None}
+                uid, {"raw": None, "obtenido": None, "desde": None, "ultimo_intento": None, "error": None}
             )
             ahora = datetime.now(timezone.utc)
             caducado = entrada["obtenido"] is None or ahora - entrada["obtenido"] > CADUCIDAD_DATOS
@@ -295,7 +306,14 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
                 try:
                     import enable_banking as eb
                     date_from = (date.today() - timedelta(days=DIAS_HISTORIAL)).isoformat()
-                    entrada["raw"] = eb.get_transactions(_eb_app_id, _eb_key, uid, date_from=date_from)
+                    nuevos = [
+                        reducir_movimiento(t)
+                        for t in eb.get_transactions(_eb_app_id, _eb_key, uid, date_from=date_from)
+                    ]
+                    # Historial acumulado: los últimos 89 días se sustituyen, lo anterior se conserva
+                    desde_previo = _desde_cuenta(entrada)
+                    entrada["raw"] = combinar_historial(entrada["raw"], nuevos, date_from)
+                    entrada["desde"] = min(desde_previo, date_from) if desde_previo else date_from
                     entrada["obtenido"] = ahora
                     entrada["error"] = None
                 except Exception as e:
@@ -315,7 +333,7 @@ def _ajustes() -> dict:
     """Categorías y clasificaciones del usuario, compartidas por todas las sesiones.
 
     Sobreviven a recargas y son las mismas en el móvil y en el PC, pero se pierden
-    al reiniciar la app: para eso está la copia descargable de la pestaña Categorías.
+    al reiniciar la app: para eso está la copia de seguridad de la pestaña Conexión.
     """
     return ajustes_por_defecto()
 
@@ -363,6 +381,13 @@ else:
     _selected_uids = ()
 
 df, _sin_actualizar = load_data(_selected_uids, forzar=st.session_state.pop("forzar_recarga", False))
+
+# Mes parcial: el de la fecha más antigua desde la que hay historial, si no empieza el día 1
+_alm_cuentas, _ = _almacen()
+_desdes = [d for uid in _selected_uids if uid in _alm_cuentas and (d := _desde_cuenta(_alm_cuentas[uid]))]
+if _desdes:
+    _inicio = date.fromisoformat(min(_desdes)[:10])
+    MES_PARCIAL = pd.Period(_inicio, freq="M") if _inicio.day > 1 else None
 
 # Aviso cuando alguna cuenta muestra datos antiguos o aún no tiene datos
 if _sin_actualizar:
@@ -760,40 +785,6 @@ with tab3:
             label_visibility="collapsed",
         )
 
-    # --- Copia de seguridad de las categorías ---
-    with st.expander("Copia de seguridad de categorías"):
-        st.caption(
-            "Las categorías se guardan en la memoria del servidor: se mantienen al recargar y "
-            "entre dispositivos, pero **se pierden cada vez que la app se reinicia** (por "
-            "ejemplo al hacer push). Descarga una copia después de cambiarlas y súbela tras un reinicio."
-        )
-        st.download_button(
-            "Descargar copia",
-            data=exportar_ajustes(AJUSTES),
-            file_name=f"categorias_gastos_{date.today():%Y%m%d}.json",
-            mime="application/json",
-        )
-        st.caption("⚠️ La copia incluye nombres de comercios: guárdala en un sitio privado.")
-
-        copia_ok = st.session_state.pop("copia_ok", None)
-        if copia_ok:
-            st.success(copia_ok)
-
-        # 1 MB: una copia real ocupa unos pocos KB; evita subir archivos grandes al servidor
-        archivo = st.file_uploader("Subir copia", type=["json"], key="subir_copia", max_upload_size=1)
-        # El archivo sigue en el widget en cada recarga: se aplica solo una vez por subida
-        if archivo is not None and st.session_state.get("copia_aplicada") != archivo.file_id:
-            st.session_state["copia_aplicada"] = archivo.file_id
-            try:
-                nuevos = importar_ajustes(archivo.getvalue())
-            except ValueError as e:
-                st.error(f"No se ha aplicado la copia: {e}")
-            else:
-                AJUSTES.clear()
-                AJUSTES.update(nuevos)
-                st.session_state["copia_ok"] = f"Copia aplicada: {len(nuevos['categorias'])} categorías restauradas."
-                st.rerun()
-
 
 # ═══════════════════════════════════════════════
 # TAB 4 — TRANSACCIONES
@@ -921,6 +912,75 @@ with tab5:
             st.rerun()
         if st.session_state.get("iniciar_auth"):
             _mostrar_enlace_auth(app_id, private_key)
+
+    # --- Copia de seguridad (categorías + historial de movimientos) ---
+    with st.expander("💾 Copia de seguridad"):
+        st.caption(
+            "Tus categorías y tu historial de movimientos se guardan en la memoria del servidor: "
+            "se mantienen al recargar y entre dispositivos, pero **se pierden cada vez que la app "
+            "se reinicia**. Descarga una copia de vez en cuando y súbela tras un reinicio."
+        )
+        _alm_copia, _bloqueo_copia = _almacen()
+        with _bloqueo_copia:
+            _cuentas_copia = {
+                uid: {
+                    "movimientos": [reducir_movimiento(t) for t in ent["raw"]],
+                    "desde": _desde_cuenta(ent),
+                    "obtenido": ent["obtenido"].isoformat() if ent.get("obtenido") else None,
+                }
+                for uid, ent in _alm_copia.items() if ent.get("raw")
+            }
+        _n_movs = sum(len(c["movimientos"]) for c in _cuentas_copia.values())
+        st.download_button(
+            "Descargar copia",
+            data=exportar_copia(AJUSTES, _cuentas_copia),
+            file_name=f"copia_gastos_{date.today():%Y%m%d}.json",
+            mime="application/json",
+        )
+        st.caption(
+            f"Incluye tus categorías y {_n_movs} movimientos. ⚠️ Contiene todos tus movimientos "
+            "bancarios: guárdala en un sitio privado y nunca en el repositorio, que es público."
+        )
+
+        copia_ok = st.session_state.pop("copia_ok", None)
+        if copia_ok:
+            st.success(copia_ok)
+
+        archivo = st.file_uploader("Subir copia", type=["json"], key="subir_copia", max_upload_size=10)
+        # El archivo sigue en el widget en cada recarga: se aplica solo una vez por subida
+        if archivo is not None and st.session_state.get("copia_aplicada") != archivo.file_id:
+            st.session_state["copia_aplicada"] = archivo.file_id
+            try:
+                ajustes_copia, cuentas_copia = importar_copia(archivo.getvalue())
+            except ValueError as e:
+                st.error(f"No se ha aplicado la copia: {e}")
+            else:
+                AJUSTES.clear()
+                AJUSTES.update(ajustes_copia)
+                with _bloqueo_copia:
+                    antes = sum(len(e.get("raw") or []) for e in _alm_copia.values())
+                    for uid, cuenta in cuentas_copia.items():
+                        obtenido = datetime.fromisoformat(cuenta["obtenido"]) if cuenta["obtenido"] else None
+                        if obtenido and obtenido.tzinfo is None:
+                            obtenido = obtenido.replace(tzinfo=timezone.utc)
+                        ent = _alm_copia.setdefault(
+                            uid, {"raw": None, "obtenido": None, "desde": None, "ultimo_intento": None, "error": None}
+                        )
+                        if ent.get("raw"):
+                            # Lo que ya hay en memoria es más reciente en su franja; de la copia se
+                            # recupera todo lo anterior a esa franja
+                            desde_mem = _desde_cuenta(ent)
+                            ent["raw"] = combinar_historial(cuenta["movimientos"], ent["raw"], desde_mem)
+                            if cuenta["desde"]:
+                                ent["desde"] = min(desde_mem, cuenta["desde"])
+                        else:
+                            ent.update(raw=cuenta["movimientos"], desde=cuenta["desde"], obtenido=obtenido)
+                    recuperados = sum(len(e.get("raw") or []) for e in _alm_copia.values()) - antes
+                st.session_state["copia_ok"] = (
+                    f"Copia aplicada: {len(ajustes_copia['categorias'])} categorías restauradas y "
+                    f"{recuperados} movimientos anteriores recuperados."
+                )
+                st.rerun()
 
     # --- Diagnóstico ---
     with st.expander("🔍 Diagnóstico de conexión"):

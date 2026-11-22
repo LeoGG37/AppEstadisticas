@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import datetime
 
 import pandas as pd
 
@@ -101,12 +102,11 @@ CATEGORIA_INGRESO = "Ingreso"  # Reservada para los ingresos
 CATEGORIAS_AUTOMATICAS = set(MERCHANT_RULES) | {CATEGORIA_OTROS}
 PALETA_EXTRA = ["#0f8b8d", "#a05195", "#2f4b7c", "#7a9e2e", "#b5651d", "#5f7d95", "#c94f7c", "#3d9970"]
 
-# Límites para validar la copia que sube el usuario
+# Límites para validar los ajustes guardados
 MAX_CATEGORIAS = 50
 MAX_LONG_NOMBRE = 40
 MAX_CLASIFICACIONES = 5000
 MAX_LONG_DESCRIPCION = 300
-MAX_BYTES_COPIA = 500_000
 _COLOR_VALIDO = re.compile(r"^#[0-9a-fA-F]{6}$")  # Evita inyectar CSS a través del color
 
 
@@ -203,20 +203,13 @@ def aplicar_ajustes(df: pd.DataFrame, ajustes: dict) -> pd.DataFrame:
     return df
 
 
-def exportar_ajustes(ajustes: dict) -> str:
-    return json.dumps({"version": 1, **ajustes}, ensure_ascii=False, indent=2)
+def validar_ajustes(datos) -> dict:
+    """Comprueba unos ajustes guardados (p. ej. en la caja fuerte) y devuelve una versión limpia.
 
-
-def importar_ajustes(contenido: bytes) -> dict:
-    """Valida una copia subida por el usuario. Lanza ValueError con el motivo si no es válida."""
-    if len(contenido) > MAX_BYTES_COPIA:
-        raise ValueError("El archivo es demasiado grande para ser una copia de categorías.")
-    try:
-        datos = json.loads(contenido.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise ValueError("El archivo no es un JSON válido.")
-    if not isinstance(datos, dict) or datos.get("version") != 1:
-        raise ValueError("No parece una copia de Mis Gastos (versión desconocida).")
+    Lanza ValueError con el motivo si no son válidos.
+    """
+    if not isinstance(datos, dict):
+        raise ValueError("Los ajustes guardados no tienen el formato esperado.")
 
     categorias = datos.get("categorias")
     if (
@@ -227,27 +220,27 @@ def importar_ajustes(contenido: bytes) -> dict:
         or CATEGORIA_OTROS not in categorias
         or CATEGORIA_INGRESO in categorias
     ):
-        raise ValueError("La lista de categorías de la copia no es válida.")
+        raise ValueError("La lista de categorías guardada no es válida.")
 
     def _textos(clave: str) -> dict:
         valor = datos.get(clave, {})
         if not isinstance(valor, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in valor.items()
         ):
-            raise ValueError(f"El apartado «{clave}» de la copia no tiene el formato esperado.")
+            raise ValueError(f"El apartado «{clave}» de los ajustes guardados no tiene el formato esperado.")
         return valor
 
     colores, clasificaciones, renombradas = _textos("colores"), _textos("clasificaciones"), _textos("renombradas")
     if not all(_COLOR_VALIDO.match(c) for c in colores.values()):
-        raise ValueError("La copia contiene colores no válidos.")
+        raise ValueError("Los ajustes guardados contienen colores no válidos.")
     if len(clasificaciones) > MAX_CLASIFICACIONES or not all(
         len(d) <= MAX_LONG_DESCRIPCION and c in categorias for d, c in clasificaciones.items()
     ):
-        raise ValueError("Las clasificaciones de la copia no son válidas.")
+        raise ValueError("Las clasificaciones guardadas no son válidas.")
     if not all(o in CATEGORIAS_AUTOMATICAS and a in categorias for o, a in renombradas.items()):
-        raise ValueError("Los cambios de nombre de la copia no son válidos.")
+        raise ValueError("Los cambios de nombre guardados no son válidos.")
 
-    # Las copias anteriores a esta función no traen "fijas": se usan los valores iniciales
+    # Los ajustes anteriores a los gastos fijos no traen "fijas": se usan los valores iniciales
     if "fijas" in datos:
         fijas = datos["fijas"]
         if (
@@ -255,7 +248,7 @@ def importar_ajustes(contenido: bytes) -> dict:
             or not all(isinstance(c, str) and c in categorias for c in fijas)
             or len(set(fijas)) != len(fijas)
         ):
-            raise ValueError("La lista de gastos fijos de la copia no es válida.")
+            raise ValueError("La lista de gastos fijos guardada no es válida.")
     else:
         fijas = [c for c in DEFAULT_FIJAS if c in categorias]
 
@@ -269,7 +262,7 @@ def importar_ajustes(contenido: bytes) -> dict:
     for c in categorias:
         if c not in resultado["colores"]:
             resultado["colores"][c] = _color_libre(resultado)
-    # Categorías automáticas que faltan en la copia: sus movimientos van a "Otros", como al borrarlas
+    # Categorías automáticas que faltan en los ajustes: sus movimientos van a "Otros", como al borrarlas
     for auto in CATEGORIAS_AUTOMATICAS:
         if auto not in categorias and auto not in resultado["renombradas"]:
             resultado["renombradas"][auto] = CATEGORIA_OTROS
@@ -291,6 +284,128 @@ def is_income(description: str) -> bool:
     """Detecta si una descripción corresponde a un ingreso."""
     d = description.lower()
     return any(kw in d for kw in INCOME_KEYWORDS)
+
+
+# ═══════════════════════════════════════════════
+# HISTORIAL DE MOVIMIENTOS
+# ═══════════════════════════════════════════════
+
+def reducir_movimiento(t: dict) -> dict:
+    """Se queda solo con los campos que usa la app (menos datos guardados, p. ej. sin IBAN ajenos)."""
+    reducido = {
+        clave: t[clave]
+        for clave in ("credit_debit_indicator", "booking_date", "value_date", "transaction_date",
+                      "remittance_information", "entry_reference", "status")
+        if t.get(clave) is not None
+    }
+    importe = t.get("transaction_amount") or {}
+    reducido["transaction_amount"] = {"amount": importe.get("amount"), "currency": importe.get("currency")}
+    for parte in ("creditor", "debtor"):
+        nombre = (t.get(parte) or {}).get("name")
+        if nombre:
+            reducido[parte] = {"name": nombre}
+    return reducido
+
+
+def _fecha_movimiento(t: dict) -> str:
+    return t.get("booking_date") or t.get("value_date") or t.get("transaction_date") or ""
+
+
+def combinar_historial(antiguos: list | None, nuevos: list, desde: str) -> list:
+    """Historial acumulado: lo nuevo manda desde la fecha 'desde'; lo anterior se conserva.
+
+    Así se recogen las correcciones del banco (pendientes que se contabilizan, cargos
+    con fecha atrasada) sin duplicar movimientos. 'desde' es una fecha ISO (AAAA-MM-DD).
+    """
+    conservados = [t for t in (antiguos or []) if _fecha_movimiento(t) and _fecha_movimiento(t) < desde]
+    return conservados + list(nuevos)
+
+
+# ═══════════════════════════════════════════════
+# COPIA DE SEGURIDAD (categorías + historial)
+# ═══════════════════════════════════════════════
+# Formato: {"version": 2, "ajustes": {...},
+#           "cuentas": {uid: {"movimientos": [...], "desde": "AAAA-MM-DD", "obtenido": ISO}}}
+# La versión 1 (copias antiguas) solo traía los ajustes, en el primer nivel.
+
+MAX_BYTES_COPIA = 10_000_000
+MAX_CUENTAS = 20
+MAX_MOVIMIENTOS = 100_000
+_FECHA_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def exportar_copia(ajustes: dict, cuentas: dict) -> str:
+    return json.dumps({"version": 2, "ajustes": ajustes, "cuentas": cuentas}, ensure_ascii=False)
+
+
+def _validar_movimiento(t) -> dict:
+    """Comprueba un movimiento de la copia y lo deja solo con los campos que usa la app."""
+    if not isinstance(t, dict):
+        raise ValueError
+    float((t.get("transaction_amount") or {}).get("amount"))  # Lanza si no es un número
+    fecha = _fecha_movimiento(t)
+    if t.get("credit_debit_indicator") not in ("CRDT", "DBIT") or not (
+        isinstance(fecha, str) and _FECHA_ISO.match(fecha) and len(fecha) <= 30
+    ):
+        raise ValueError
+    for parte in ("creditor", "debtor"):
+        nombre = (t.get(parte) or {}).get("name")
+        if nombre is not None and not (isinstance(nombre, str) and len(nombre) <= MAX_LONG_DESCRIPCION):
+            raise ValueError
+    info = t.get("remittance_information")
+    if info is not None and not (
+        isinstance(info, list) and len(info) <= 10
+        and all(isinstance(x, str) and len(x) <= MAX_LONG_DESCRIPCION for x in info)
+    ):
+        raise ValueError
+    return reducir_movimiento(t)
+
+
+def importar_copia(contenido: bytes) -> tuple:
+    """Valida una copia subida por el usuario. Devuelve (ajustes, cuentas).
+
+    Lanza ValueError con el motivo si no es válida: no se aplica nada a medias.
+    """
+    if len(contenido) > MAX_BYTES_COPIA:
+        raise ValueError("El archivo es demasiado grande para ser una copia de Mis Gastos.")
+    try:
+        datos = json.loads(contenido.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("El archivo no es un JSON válido.")
+    if not isinstance(datos, dict) or datos.get("version") not in (1, 2):
+        raise ValueError("No parece una copia de Mis Gastos (versión desconocida).")
+
+    if datos["version"] == 1:
+        return validar_ajustes(datos), {}
+
+    ajustes = validar_ajustes(datos.get("ajustes"))
+    cuentas = datos.get("cuentas", {})
+    if not isinstance(cuentas, dict) or len(cuentas) > MAX_CUENTAS:
+        raise ValueError("Las cuentas de la copia no tienen el formato esperado.")
+    if sum(len(c.get("movimientos") or []) for c in cuentas.values() if isinstance(c, dict)) > MAX_MOVIMIENTOS:
+        raise ValueError("La copia tiene demasiados movimientos.")
+
+    limpias = {}
+    for uid, cuenta in cuentas.items():
+        try:
+            if not (isinstance(uid, str) and 0 < len(uid) <= 100 and isinstance(cuenta, dict)):
+                raise ValueError
+            movimientos = cuenta.get("movimientos") or []
+            if not isinstance(movimientos, list):
+                raise ValueError
+            desde, obtenido = cuenta.get("desde"), cuenta.get("obtenido")
+            if desde is not None and not (isinstance(desde, str) and _FECHA_ISO.match(desde)):
+                raise ValueError
+            if obtenido is not None:
+                datetime.fromisoformat(obtenido)  # Lanza si no es una fecha válida
+            limpias[uid] = {
+                "movimientos": [_validar_movimiento(t) for t in movimientos],
+                "desde": desde,
+                "obtenido": obtenido,
+            }
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("La copia contiene movimientos o cuentas no válidos.")
+    return ajustes, limpias
 
 
 def parse_eb_transactions(raw: list) -> pd.DataFrame:

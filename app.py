@@ -19,6 +19,7 @@ from data import (  # noqa: E402
     monthly_summary,
     COLORS,
     CATEGORIA_OTROS,
+    DEFAULT_FIJAS,
     nombre_mes,
     fecha_corta,
     ajustes_por_defecto,
@@ -293,6 +294,8 @@ def _ajustes() -> dict:
 
 
 AJUSTES = _ajustes()
+# Los ajustes que ya estaban en memoria antes de existir los gastos fijos no traen la lista
+AJUSTES.setdefault("fijas", [c for c in DEFAULT_FIJAS if c in AJUSTES["categorias"]])
 
 # --- Título ---
 st.title("Mis Gastos")
@@ -457,6 +460,16 @@ with tab1:
             ("Ahorro",   f"{ahorro:.1f}%",     None),
         ])
 
+        # Gastos fijos (categorías marcadas en Categorías → Editar categorías) y variables
+        gastos_mes = df_mes[df_mes["tipo"] == "gasto"]
+        fijos = abs(gastos_mes[gastos_mes["categoria"].isin(AJUSTES["fijas"])]["monto"].sum())
+        variables = gastos - fijos
+        pct_fijos = round(fijos / gastos * 100) if gastos > 0 else 0
+        _metricas([
+            (f"Fijos ({pct_fijos} %)",           f"{fijos:,.2f} €",     None),
+            (f"Variables ({100 - pct_fijos} %)", f"{variables:,.2f} €", None),
+        ])
+
         st.divider()
 
         col_rec, col_top = st.columns(2)
@@ -605,10 +618,14 @@ with tab3:
             for cat, importe in por_cat.items():
                 pct = round(importe / total_mes * 100) if total_mes > 0 else 0
                 color = AJUSTES["colores"].get(cat, COLORS["neutral"])
+                etiqueta_fija = (
+                    '<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;">fijo</span>'
+                    if cat in AJUSTES["fijas"] else ""
+                )
                 st.markdown(
                     f'<div style="display:flex;justify-content:space-between;'
                     f'margin-bottom:2px;">'
-                    f'<span style="font-size:13px;">● {html.escape(cat)}</span>'
+                    f'<span style="font-size:13px;">● {html.escape(cat)}{etiqueta_fija}</span>'
                     f'<span style="font-size:13px;font-weight:500;">{importe:,.2f} €</span>'
                     f'</div>'
                     f'<div style="background:#f0efec;border-radius:4px;height:4px;'
@@ -651,7 +668,7 @@ with tab3:
             st.error(error_cat)
 
         for cat in list(AJUSTES["categorias"]):
-            fija = cat == CATEGORIA_OTROS
+            bloqueada = cat == CATEGORIA_OTROS
             clave = f"cat_{cat}"
             if clave not in st.session_state:
                 st.session_state[clave] = cat  # Valor inicial del campo (sin usar value=)
@@ -659,12 +676,28 @@ with tab3:
             with st.container(horizontal=True, vertical_alignment="center"):
                 st.text_input(
                     cat, key=clave, label_visibility="collapsed",
-                    on_change=_al_renombrar, args=(cat,), disabled=fija,
+                    on_change=_al_renombrar, args=(cat,), disabled=bloqueada,
                 )
                 st.button(
                     "✕", key=f"del_{cat}", help=f"Eliminar {cat}",
-                    on_click=_al_borrar, args=(cat,), disabled=fija,
+                    on_click=_al_borrar, args=(cat,), disabled=bloqueada,
                 )
+
+        # --- Gastos fijos: botones que se marcan y desmarcan tocándolos ---
+        st.markdown("**¿Qué categorías son gastos fijos?**")
+        st.caption("Lo que pagas sí o sí cada mes, aunque el importe cambie. El resto cuenta como variable.")
+        # La clave cambia con las categorías y las fijas: así el widget nunca muestra un estado viejo
+        clave_fijas = f"fijas_{hash((tuple(AJUSTES['categorias']), tuple(AJUSTES['fijas'])))}"
+
+        def _al_cambiar_fijas():
+            marcadas = st.session_state[clave_fijas] or []
+            AJUSTES["fijas"] = [c for c in AJUSTES["categorias"] if c in marcadas]
+
+        st.pills(
+            "Gastos fijos", AJUSTES["categorias"], selection_mode="multi",
+            default=AJUSTES["fijas"], key=clave_fijas, on_change=_al_cambiar_fijas,
+            label_visibility="collapsed",
+        )
 
     # --- Copia de seguridad de las categorías ---
     with st.expander("Copia de seguridad de categorías"):

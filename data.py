@@ -91,9 +91,12 @@ INCOME_KEYWORDS = ["nomina", "nómina", "transferencia recibida", "bizum recibid
 # ═══════════════════════════════════════════════
 # Estructura: {"categorias": [...], "colores": {cat: "#rrggbb"},
 #              "clasificaciones": {descripción: cat},   # asignadas a mano
-#              "renombradas": {cat_automática: cat_actual}}  # renombradas o borradas
+#              "renombradas": {cat_automática: cat_actual},  # renombradas o borradas
+#              "fijas": [...]}  # categorías de gasto fijo; el resto cuenta como variable
 
 CATEGORIA_OTROS = "Otros"      # Destino de lo no clasificado: no se puede renombrar ni borrar
+# Gasto fijo = lo que se paga sí o sí cada mes, aunque el importe cambie (p. ej. el supermercado)
+DEFAULT_FIJAS = ["Alimentación", "Transporte", "Servicios", "Salud", "Inversión"]
 CATEGORIA_INGRESO = "Ingreso"  # Reservada para los ingresos
 CATEGORIAS_AUTOMATICAS = set(MERCHANT_RULES) | {CATEGORIA_OTROS}
 PALETA_EXTRA = ["#0f8b8d", "#a05195", "#2f4b7c", "#7a9e2e", "#b5651d", "#5f7d95", "#c94f7c", "#3d9970"]
@@ -113,6 +116,7 @@ def ajustes_por_defecto() -> dict:
         "colores": dict(CAT_COLORS),
         "clasificaciones": {},
         "renombradas": {},
+        "fijas": DEFAULT_FIJAS.copy(),
     }
 
 
@@ -174,6 +178,7 @@ def renombrar_categoria(ajustes: dict, viejo: str, nuevo: str) -> str | None:
         return error
     ajustes["categorias"][ajustes["categorias"].index(viejo)] = nuevo
     ajustes["colores"][nuevo] = ajustes["colores"].pop(viejo, COLORS["neutral"])  # Conserva su color
+    ajustes["fijas"] = [nuevo if c == viejo else c for c in ajustes["fijas"]]     # y si es fija
     _redirigir(ajustes, viejo, nuevo)
     return None
 
@@ -183,6 +188,7 @@ def borrar_categoria(ajustes: dict, nombre: str) -> str | None:
         return f"«{CATEGORIA_OTROS}» no se puede borrar: es donde van los comercios sin clasificar."
     ajustes["categorias"].remove(nombre)
     ajustes["colores"].pop(nombre, None)
+    ajustes["fijas"] = [c for c in ajustes["fijas"] if c != nombre]
     _redirigir(ajustes, nombre, CATEGORIA_OTROS)  # Sus movimientos pasan a "Otros"
     return None
 
@@ -241,11 +247,24 @@ def importar_ajustes(contenido: bytes) -> dict:
     if not all(o in CATEGORIAS_AUTOMATICAS and a in categorias for o, a in renombradas.items()):
         raise ValueError("Los cambios de nombre de la copia no son válidos.")
 
+    # Las copias anteriores a esta función no traen "fijas": se usan los valores iniciales
+    if "fijas" in datos:
+        fijas = datos["fijas"]
+        if (
+            not isinstance(fijas, list)
+            or not all(isinstance(c, str) and c in categorias for c in fijas)
+            or len(set(fijas)) != len(fijas)
+        ):
+            raise ValueError("La lista de gastos fijos de la copia no es válida.")
+    else:
+        fijas = [c for c in DEFAULT_FIJAS if c in categorias]
+
     resultado = {
         "categorias": list(categorias),
         "colores": {c: colores[c] for c in categorias if c in colores},
         "clasificaciones": dict(clasificaciones),
         "renombradas": dict(renombradas),
+        "fijas": list(fijas),
     }
     for c in categorias:
         if c not in resultado["colores"]:

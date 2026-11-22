@@ -615,25 +615,36 @@ with tab3:
 
         with col_list:
             total_mes = por_cat.sum()
-            for cat, importe in por_cat.items():
-                pct = round(importe / total_mes * 100) if total_mes > 0 else 0
-                color = AJUSTES["colores"].get(cat, COLORS["neutral"])
-                etiqueta_fija = (
-                    '<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;">fijo</span>'
-                    if cat in AJUSTES["fijas"] else ""
+            # Todas las categorías caen en uno de los dos grupos: las marcadas son fijas, el resto variables
+            grupos = [
+                ("Fijos", por_cat[por_cat.index.isin(AJUSTES["fijas"])]),
+                ("Variables", por_cat[~por_cat.index.isin(AJUSTES["fijas"])]),
+            ]
+            for nombre_grupo, cats_grupo in grupos:
+                subtotal = cats_grupo.sum()
+                pct_grupo = round(subtotal / total_mes * 100) if total_mes > 0 else 0
+                html_grupo = (
+                    f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
+                    f'border-bottom:1px solid #e3e2de;padding-bottom:4px;margin:6px 0 10px;">'
+                    f'<span style="font-size:15px;font-weight:600;">{nombre_grupo}'
+                    f'<span style="font-size:12px;font-weight:400;color:#898781;"> · {pct_grupo} %</span></span>'
+                    f'<span style="font-size:15px;font-weight:600;">{subtotal:,.2f} €</span></div>'
                 )
-                st.markdown(
-                    f'<div style="display:flex;justify-content:space-between;'
-                    f'margin-bottom:2px;">'
-                    f'<span style="font-size:13px;">● {html.escape(cat)}{etiqueta_fija}</span>'
-                    f'<span style="font-size:13px;font-weight:500;">{importe:,.2f} €</span>'
-                    f'</div>'
-                    f'<div style="background:#f0efec;border-radius:4px;height:4px;'
-                    f'margin-bottom:10px;">'
-                    f'<div style="background:{color};height:4px;border-radius:4px;'
-                    f'width:{pct}%;"></div></div>',
-                    unsafe_allow_html=True,
-                )
+                if cats_grupo.empty:
+                    html_grupo += '<p style="font-size:12px;color:#898781;margin:0 0 14px;">Sin gastos en este periodo.</p>'
+                for cat, importe in cats_grupo.items():
+                    pct = round(importe / total_mes * 100) if total_mes > 0 else 0
+                    color = AJUSTES["colores"].get(cat, COLORS["neutral"])
+                    html_grupo += (
+                        f'<div style="padding-left:10px;">'
+                        f'<div style="display:flex;justify-content:space-between;margin-bottom:2px;">'
+                        f'<span style="font-size:13px;">● {html.escape(cat)}</span>'
+                        f'<span style="font-size:13px;font-weight:500;">{importe:,.2f} €</span></div>'
+                        f'<div style="background:#f0efec;border-radius:4px;height:4px;margin-bottom:10px;">'
+                        f'<div style="background:{color};height:4px;border-radius:4px;width:{pct}%;"></div>'
+                        f'</div></div>'
+                    )
+                st.markdown(html_grupo, unsafe_allow_html=True)
 
         st.divider()
 

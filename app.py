@@ -353,6 +353,34 @@ if _sin_actualizar:
 # Aplicar cambios de nombre y clasificaciones manuales del usuario
 df = aplicar_ajustes(df, AJUSTES)
 
+# --- Selector de periodo (común a todas las pestañas) ---
+MESES_POR_DEFECTO = 4  # El mes actual y los 3 anteriores
+_meses_disp = sorted(df["mes"].dropna().unique())
+if _meses_disp:
+    _mes_actual = pd.Period(date.today(), freq="M")
+    _ultimo = _mes_actual if _mes_actual in _meses_disp else _meses_disp[-1]
+    # Valor inicial, o corregido si el mes ya no existe (p. ej. al cambiar de cuentas)
+    if st.session_state.get("periodo_desde") not in _meses_disp:
+        st.session_state["periodo_desde"] = max(_meses_disp[0], _ultimo - (MESES_POR_DEFECTO - 1))
+
+    # Los dos desplegables en la misma fila, también en el móvil
+    with st.container(horizontal=True):
+        # Nombres cortos ("Ago 2026") para que quepan dos desplegables en el móvil
+        periodo_desde = st.selectbox(
+            "Desde", _meses_disp, key="periodo_desde", format_func=lambda m: _mes(m, corto=True)
+        )
+        # "Hasta" solo ofrece meses iguales o posteriores a "Desde": no hay periodos al revés
+        _opciones_hasta = [m for m in _meses_disp if m >= periodo_desde]
+        if st.session_state.get("periodo_hasta") not in _opciones_hasta:
+            st.session_state["periodo_hasta"] = _ultimo if _ultimo in _opciones_hasta else _opciones_hasta[-1]
+        periodo_hasta = st.selectbox(
+            "Hasta", _opciones_hasta, key="periodo_hasta", format_func=lambda m: _mes(m, corto=True)
+        )
+
+    df_p = df[(df["mes"] >= periodo_desde) & (df["mes"] <= periodo_hasta)]
+else:
+    df_p = df  # Sin datos: las pestañas muestran su aviso
+
 
 def _mostrar_enlace_auth(app_id, private_key):
     """Genera (o reutiliza) el enlace de autorización de Santander."""
@@ -389,20 +417,12 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Dashboard", "Histórico", "Categorías"
 # TAB 1 — DASHBOARD
 # ═══════════════════════════════════════════════
 with tab1:
-    meses = sorted(df["mes"].unique(), reverse=True)
-    if not meses:
+    if df_p.empty:
         st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
     else:
-        mes_sel = st.selectbox(
-            "Mes",
-            meses,
-            format_func=_mes,
-            label_visibility="collapsed",
-        )
+        df_mes = df_p  # Movimientos del periodo elegido
 
-        df_mes = df[df["mes"] == mes_sel]
-
-        # --- Notificación de transacciones sin clasificar ---
+        # --- Notificación de transacciones sin clasificar (de todo el historial, no solo del periodo) ---
         sin_clasificar = df[
             (df["categoria"] == "Otros") & (df["tipo"] == "gasto")
         ]["descripcion"].unique()
@@ -450,7 +470,7 @@ with tab1:
             recurrentes["monto"] = recurrentes["monto"].abs()
 
             if recurrentes.empty:
-                st.caption("Sin recurrentes este mes.")
+                st.caption("Sin recurrentes en este periodo.")
             else:
                 filas = "".join(
                     _fila(
@@ -486,13 +506,17 @@ with tab1:
 # TAB 2 — HISTÓRICO
 # ═══════════════════════════════════════════════
 with tab2:
-    resumen = monthly_summary(df)
+    resumen = monthly_summary(df_p)
 
     if resumen.empty:
         st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
     else:
-        # "(parcial)" en una segunda línea para que las etiquetas no se inclinen en el móvil
-        etiquetas = [_mes(m, corto=True).replace(" (parcial)", "<br>(parcial)") for m in resumen.index]
+        # Etiquetas cortas en dos líneas ("Jun" / "2026") para que quepan muchos meses en el móvil;
+        # el mes incompleto lleva un asterisco y se explica debajo del gráfico
+        etiquetas = [
+            f"{nombre_mes(m, corto=True).split()[0]}{'*' if m == MES_PARCIAL else ''}<br>{m.year}"
+            for m in resumen.index
+        ]
         colores_gastos = [
             COLORS["balance_neg"] if d else COLORS["expense"]
             for d in resumen["deficit"]
@@ -527,9 +551,11 @@ with tab2:
         )
         # Eje de categorías: una etiqueta por barra. Si no, Plotly lee "2026-08" como fecha
         # y pone marcas cada ~30 días (salían "Aug 1" y "Aug 31")
-        fig.update_xaxes(fixedrange=True, type="category", tickangle=0)
+        fig.update_xaxes(fixedrange=True, type="category")
         fig.update_yaxes(fixedrange=True)
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        if MES_PARCIAL in resumen.index:
+            st.caption(f"\\* {nombre_mes(MES_PARCIAL)}: mes incompleto, solo incluye sus últimos días.")
 
         st.divider()
 
@@ -548,19 +574,10 @@ with tab2:
 # TAB 3 — CATEGORÍAS
 # ═══════════════════════════════════════════════
 with tab3:
-    meses_c = sorted(df["mes"].unique(), reverse=True)
-    if not meses_c:
+    if df_p.empty:
         st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
     else:
-        mes_c = st.selectbox(
-            "Mes",
-            meses_c,
-            format_func=_mes,
-            label_visibility="collapsed",
-            key="mes_categorias",
-        )
-
-        df_c = df[(df["mes"] == mes_c) & (df["tipo"] == "gasto")]
+        df_c = df_p[df_p["tipo"] == "gasto"]
         por_cat = df_c.groupby("categoria")["monto"].sum().abs().sort_values(ascending=False)
 
         col_chart, col_list = st.columns([1, 1])
@@ -695,7 +712,7 @@ with tab4:
         cat_filtro = st.selectbox("Categoría", cats_disponibles, label_visibility="collapsed")
         tipo_filtro = st.selectbox("Tipo", ["Todos", "Gasto", "Ingreso"], label_visibility="collapsed")
 
-    df_t = df.copy()
+    df_t = df_p.copy()  # Movimientos del periodo elegido
     if busqueda:
         df_t = df_t[df_t["descripcion"].str.contains(busqueda, case=False, na=False)]
     if cat_filtro != "Todas":

@@ -179,11 +179,38 @@ def _empty_df() -> pd.DataFrame:
 CADUCIDAD_DATOS = timedelta(hours=24)   # Cada cuánto se piden datos nuevos
 ESPERA_TRAS_FALLO = timedelta(hours=6)  # Tras un fallo, no reintentar antes de esto
 ZONA_ES = ZoneInfo("Europe/Madrid")     # El servidor de Streamlit Cloud funciona en UTC
+# Pasada ~1 h desde la autorización, muchos bancos solo dan los últimos 90 días; pedir
+# más devuelve WRONG_TRANSACTIONS_PERIOD. 89 deja un día de margen por la zona horaria.
+DIAS_HISTORIAL = 89
+
+
+def _motivo_error(e: Exception, uid: str) -> str:
+    """Traduce el error de una llamada al banco a un texto corto, sin el identificador de la cuenta."""
+    respuesta = getattr(e, "response", None)
+    if respuesta is None:
+        return f"sin respuesta del banco ({type(e).__name__})"
+    estado = respuesta.status_code
+    try:
+        cuerpo = respuesta.json()
+    except ValueError:
+        cuerpo = {}
+    codigo = str(cuerpo.get("error") or cuerpo.get("code") or "") if isinstance(cuerpo, dict) else ""
+    detalle = str(cuerpo.get("message") or "") if isinstance(cuerpo, dict) else ""
+    if codigo == "WRONG_TRANSACTIONS_PERIOD":
+        motivo = "periodo de fechas no permitido por el banco"
+    elif estado == 429:
+        motivo = "límite de consultas del banco alcanzado"
+    elif estado in (401, 403):
+        motivo = "sesión no válida o caducada: renueva la conexión"
+    else:
+        motivo = " · ".join(p for p in (codigo, detalle) if p) or "error del banco"
+    texto = f"{motivo} ({estado})"
+    return texto.replace(uid, "…")[:150]  # Nunca mostrar el identificador de la cuenta
 
 
 @st.cache_resource
 def _almacen() -> tuple:
-    """Memoria compartida del servidor: {uid: {"raw", "obtenido", "ultimo_intento"}}.
+    """Memoria compartida del servidor: {uid: {"raw", "obtenido", "ultimo_intento", "error"}}.
 
     Sobrevive a recargas de página y a varias pestañas abiertas, pero se pierde
     si la app se reinicia (push o inactividad). El lock evita llamadas duplicadas.
@@ -196,7 +223,7 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
 
     Cuenta por cuenta: si sus datos tienen más de 24 h se piden al banco; si la
     llamada falla se conservan los últimos datos buenos. Las cuentas sin
-    actualizar se devuelven como [(uid, fecha_de_sus_datos_o_None)].
+    actualizar se devuelven como [(uid, fecha_de_sus_datos_o_None, motivo_o_None)].
     """
     if not account_uids:
         return _empty_df(), []
@@ -206,7 +233,9 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
     with bloqueo:
         llamadas = 0
         for uid in account_uids:
-            entrada = almacen.setdefault(uid, {"raw": None, "obtenido": None, "ultimo_intento": None})
+            entrada = almacen.setdefault(
+                uid, {"raw": None, "obtenido": None, "ultimo_intento": None, "error": None}
+            )
             ahora = datetime.now(timezone.utc)
             caducado = entrada["obtenido"] is None or ahora - entrada["obtenido"] > CADUCIDAD_DATOS
             en_espera = (
@@ -220,14 +249,17 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
                 entrada["ultimo_intento"] = ahora
                 try:
                     import enable_banking as eb
-                    date_from = (date.today() - timedelta(days=180)).isoformat()
+                    date_from = (date.today() - timedelta(days=DIAS_HISTORIAL)).isoformat()
                     entrada["raw"] = eb.get_transactions(_eb_app_id, _eb_key, uid, date_from=date_from)
                     entrada["obtenido"] = ahora
-                except Exception:
-                    pass  # 429 u otro error: se quedan los datos anteriores
+                    entrada["error"] = None
+                except Exception as e:
+                    # Se quedan los datos anteriores; guardamos el motivo para mostrarlo
+                    entrada["error"] = _motivo_error(e, uid)
+                    print(f"[load_data] Fallo al pedir movimientos: {entrada['error']}", flush=True)
 
             if entrada["obtenido"] is None or ahora - entrada["obtenido"] > CADUCIDAD_DATOS:
-                sin_actualizar.append((uid, entrada["obtenido"]))
+                sin_actualizar.append((uid, entrada["obtenido"], entrada["error"]))
 
         raw_total = [t for uid in account_uids for t in (almacen[uid]["raw"] or [])]
 
@@ -292,13 +324,14 @@ if _sin_actualizar:
         or {uid: f"Cuenta {i + 1}" for i, uid in enumerate(_eb_account_uids)}
     )
     _partes = []
-    for _uid, _obtenido in _sin_actualizar:
+    for _uid, _obtenido, _error in _sin_actualizar:
         _nombre = _etiquetas.get(_uid, _uid[:8])
-        if _obtenido:
-            _partes.append(f"{_nombre} (datos del {_obtenido.astimezone(ZONA_ES):%d/%m a las %H:%M})")
-        else:
-            _partes.append(f"{_nombre} (sin datos todavía)")
-    st.caption("⚠️ No se pudieron actualizar: " + ", ".join(_partes))
+        _estado = (
+            f"datos del {_obtenido.astimezone(ZONA_ES):%d/%m a las %H:%M}" if _obtenido
+            else "sin datos todavía"
+        )
+        _partes.append(f"{_nombre} ({_estado}" + (f" — {_error})" if _error else ")"))
+    st.caption("⚠️ No se pudieron actualizar: " + "; ".join(_partes))
 
 # Aplicar cambios de nombre y clasificaciones manuales del usuario
 df = aplicar_ajustes(df, AJUSTES)
@@ -796,38 +829,43 @@ with tab5:
 
         if btn_test:
             import enable_banking as eb
-            # 1) Sesión + info de cuentas para diagnosticar nombres
+            # Comprueba la sesión (no gasta el cupo de consultas de movimientos)
             if session_id:
                 try:
                     status = eb.get_session_status(app_id, private_key, session_id)
-                    accs = status.get("accounts", [])
-                    st.success(f"Sesión válida — {len(accs)} cuenta(s) encontrada(s)")
-                    for acc in accs:
-                        if isinstance(acc, str):
-                            st.caption(f"uid: `{acc[:12]}...` (la API devuelve solo el UID)")
-                        else:
-                            aid = acc.get("account_id") or {}
-                            iban = aid.get("iban", "—") if isinstance(aid, dict) else "—"
-                            st.caption(
-                                f"uid: `{acc.get('uid','?')[:12]}...` | "
-                                f"type: `{acc.get('account_type','—')}` | "
-                                f"name: `{acc.get('name','—')}` | "
-                                f"iban: `{iban}`"
-                            )
+                    st.success(f"Sesión válida — {len(status.get('accounts', []))} cuenta(s) encontrada(s)")
                 except Exception as e:
-                    st.error(f"Sesión inválida: {e}")
+                    st.error(f"Sesión inválida: {_motivo_error(e, session_id)}")
             else:
                 st.warning("No hay session_id configurado.")
 
-            # 2) Transacciones: solo mostramos lo que hay guardado (sin llamar al banco)
-            if _eb_account_uids:
-                n_txns = len(df)
-                if n_txns > 0:
-                    st.success(f"Datos guardados — {n_txns} transacción(es)")
-                else:
-                    st.warning(
-                        "Sin datos guardados. El límite de llamadas lo impone el banco (PSD2). "
-                        "Espera unas horas y pulsa **Forzar recarga de datos**."
+        # Estado de la carga de movimientos de cada cuenta (lo guardado en el servidor, sin llamar al banco)
+        if _eb_account_uids:
+            st.markdown("**Carga de movimientos**")
+            _alm, _ = _almacen()
+            _nombres = (
+                {a["uid"]: a["label"] for a in _accounts}
+                or {uid: f"Cuenta {i + 1}" for i, uid in enumerate(_eb_account_uids)}
+            )
+            for _i, _uid in enumerate(_eb_account_uids):
+                _nombre = _nombres.get(_uid, f"Cuenta {_i + 1}")
+                _ent = _alm.get(_uid)
+                if not _ent or _ent["ultimo_intento"] is None:
+                    st.caption(f"{_nombre}: todavía no se han pedido sus movimientos.")
+                    continue
+                _datos = (
+                    f"{len(_ent['raw'] or [])} movimientos del "
+                    f"{_ent['obtenido'].astimezone(ZONA_ES):%d/%m a las %H:%M}"
+                    if _ent["obtenido"] else "sin datos"
+                )
+                _intento = f"último intento el {_ent['ultimo_intento'].astimezone(ZONA_ES):%d/%m a las %H:%M}"
+                if _ent["error"]:
+                    _proximo = (_ent["ultimo_intento"] + ESPERA_TRAS_FALLO).astimezone(ZONA_ES)
+                    st.error(
+                        f"**{_nombre}**: {_datos} · {_intento}\n\n"
+                        f"Motivo: {_ent['error']}. Reintento automático a partir de las {_proximo:%H:%M}."
                     )
-            else:
-                st.warning("No hay account_uid configurado.")
+                else:
+                    st.caption(f"**{_nombre}**: {_datos} · {_intento}")
+        else:
+            st.warning("No hay account_uid configurado.")

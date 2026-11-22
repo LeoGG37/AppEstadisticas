@@ -98,7 +98,9 @@ INCOME_KEYWORDS = ["nomina", "nómina", "transferencia recibida", "bizum recibid
 #              "reglas": [{"palabra": "mercadona", "categoria": "Alimentación"}, ...],
 #              "ignorados": [descripción, ...],             # no se preguntan en el aviso
 #              "excluir_descripciones": [descripción, ...], # no cuentan en ningún cálculo
-#              "excluir_palabras": ["traspaso", ...]}       # ídem, por palabra clave
+#              "excluir_palabras": ["traspaso", ...],       # ídem, por palabra clave
+#              "devoluciones": {descripción: categoría},    # ingresos que restan de un gasto
+#              "ingresos_revisados": [descripción, ...]}    # ingresos que no se vuelven a preguntar
 
 CATEGORIA_OTROS = "Otros"      # Destino de lo no clasificado: no se puede renombrar ni borrar
 # Gasto fijo = lo que se paga sí o sí cada mes, aunque el importe cambie (p. ej. el supermercado)
@@ -129,6 +131,8 @@ def ajustes_por_defecto() -> dict:
         "ignorados": [],
         "excluir_descripciones": [],
         "excluir_palabras": [],
+        "devoluciones": {},
+        "ingresos_revisados": [],
     }
 
 
@@ -284,6 +288,9 @@ def renombrar_categoria(ajustes: dict, viejo: str, nuevo: str) -> str | None:
     for regla in ajustes["reglas"]:                                               # y sus reglas
         if regla["categoria"] == viejo:
             regla["categoria"] = nuevo
+    for desc, cat in ajustes["devoluciones"].items():                             # y devoluciones
+        if cat == viejo:
+            ajustes["devoluciones"][desc] = nuevo
     _redirigir(ajustes, viejo, nuevo)
     return None
 
@@ -295,6 +302,8 @@ def borrar_categoria(ajustes: dict, nombre: str) -> str | None:
     ajustes["colores"].pop(nombre, None)
     ajustes["fijas"] = [c for c in ajustes["fijas"] if c != nombre]
     ajustes["reglas"] = [r for r in ajustes["reglas"] if r["categoria"] != nombre]
+    # Sus devoluciones vuelven a ser ingresos normales (y se volverán a preguntar)
+    ajustes["devoluciones"] = {d: c for d, c in ajustes["devoluciones"].items() if c != nombre}
     _redirigir(ajustes, nombre, CATEGORIA_OTROS)  # Sus movimientos pasan a "Otros"
     return None
 
@@ -312,6 +321,13 @@ def aplicar_ajustes(df: pd.DataFrame, ajustes: dict) -> pd.DataFrame:
         categorias = categorias.where(de_reglas.isna(), de_reglas)
     manuales = descripciones.map(ajustes["clasificaciones"])
     df.loc[gastos, "categoria"] = categorias.where(manuales.isna(), manuales)
+    # Devoluciones: un ingreso (p. ej. el Bizum de los amigos tras pagar la cena) pasa a ser un
+    # gasto en positivo de su categoría, así resta de ella y deja de contar como ingreso
+    devoluciones = ajustes.get("devoluciones", {})
+    es_devolucion = (df["tipo"] == "ingreso") & df["descripcion"].isin(list(devoluciones))
+    df.loc[es_devolucion, "categoria"] = df.loc[es_devolucion, "descripcion"].map(devoluciones)
+    df.loc[es_devolucion, "tipo"] = "gasto"
+    df["devolucion"] = es_devolucion
     # Movimientos que no cuentan en los cálculos (p. ej. traspasos entre cuentas propias)
     df["excluido"] = df["descripcion"].isin(descripciones_excluidas(df["descripcion"].unique(), ajustes))
     return df
@@ -397,6 +413,14 @@ def validar_ajustes(datos) -> dict:
         )
     ]
 
+    devoluciones_guardadas = datos.get("devoluciones", {})
+    if not isinstance(devoluciones_guardadas, dict) or len(devoluciones_guardadas) > MAX_CLASIFICACIONES or not all(
+        isinstance(d, str) and _descripcion_valida(d) and isinstance(c, str) and c in categorias
+        for d, c in devoluciones_guardadas.items()
+    ):
+        raise ValueError("Las devoluciones guardadas no son válidas.")
+    ingresos_revisados = _lista_textos("ingresos_revisados", MAX_CLASIFICACIONES, _descripcion_valida)
+
     resultado = {
         "categorias": list(categorias),
         "colores": {c: colores[c] for c in categorias if c in colores},
@@ -407,6 +431,8 @@ def validar_ajustes(datos) -> dict:
         "ignorados": ignorados,
         "excluir_descripciones": excluir_descripciones,
         "excluir_palabras": list(dict.fromkeys(excluir_palabras)),
+        "devoluciones": dict(devoluciones_guardadas),
+        "ingresos_revisados": ingresos_revisados,
     }
     for c in categorias:
         if c not in resultado["colores"]:
@@ -627,7 +653,8 @@ def parse_eb_transactions(raw: list) -> pd.DataFrame:
 
 def monthly_summary(df: pd.DataFrame) -> pd.DataFrame:
     ingresos = df[df["tipo"] == "ingreso"].groupby("mes")["monto"].sum()
-    gastos   = df[df["tipo"] == "gasto"].groupby("mes")["monto"].sum().abs()
+    # Los gastos van en negativo y las devoluciones en positivo: se resta y nunca baja de 0
+    gastos   = (-df[df["tipo"] == "gasto"].groupby("mes")["monto"].sum()).clip(lower=0)
     resumen  = pd.DataFrame({"ingresos": ingresos, "gastos": gastos}).fillna(0)
     resumen["balance"]    = resumen["ingresos"] - resumen["gastos"]
     resumen["ahorro_pct"] = resumen.apply(

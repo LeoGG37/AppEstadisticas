@@ -139,9 +139,12 @@ def _lista_movimientos(movs: pd.DataFrame, limite: int = 100, pista: str = "") -
     filas = []
     for _, row in movs.head(limite).iterrows():
         es_ingreso = row["tipo"] == "ingreso"
-        color_monto = COLORS["balance_pos"] if es_ingreso else COLORS["balance_neg"]
-        signo = "+" if es_ingreso else "−"
+        es_devolucion = bool(row.get("devolucion"))
+        color_monto = COLORS["balance_pos"] if es_ingreso or es_devolucion else COLORS["balance_neg"]
+        signo = "+" if es_ingreso or es_devolucion else "−"
         etiquetas = ""
+        if es_devolucion:
+            etiquetas += '<span class="etiqueta" style="background:#EAF3DE;color:#3B6D11;">devolución</span>'
         if row.get("excluido"):
             etiquetas += '<span class="etiqueta" style="background:#EEEDE9;color:#6B6A66;">no cuenta</span>'
         if row["recurrente"]:
@@ -393,8 +396,9 @@ AJUSTES = _ajustes()
 # Los ajustes que ya estaban en memoria antes de existir los gastos fijos no traen la lista
 AJUSTES.setdefault("fijas", [c for c in DEFAULT_FIJAS if c in AJUSTES["categorias"]])
 AJUSTES.setdefault("reglas", [])  # Ídem para las reglas por palabra clave
-for _clave in ("ignorados", "excluir_descripciones", "excluir_palabras"):  # Ídem
+for _clave in ("ignorados", "excluir_descripciones", "excluir_palabras", "ingresos_revisados"):  # Ídem
     AJUSTES.setdefault(_clave, [])
+AJUSTES.setdefault("devoluciones", {})
 
 # --- Título ---
 st.title("Mis Gastos")
@@ -540,6 +544,7 @@ with tab1:
         # --- Notificación de transacciones sin clasificar (de todo el historial, no solo del periodo) ---
         movs_sin_clasificar = df[
             (df["categoria"] == "Otros") & (df["tipo"] == "gasto")
+            & (df["monto"] < 0)  # Solo pagos: una devolución no es un comercio en el que se gasta
             & ~df["descripcion"].isin(AJUSTES["ignorados"])  # Los ignorados ya no se preguntan
         ]
         # Un resumen por comercio, de más a menos gasto (se calcula de una vez para todos)
@@ -617,8 +622,57 @@ with tab1:
                         on_click=lambda: st.session_state.update(sc_visibles=n_visibles + 10),
                     )
 
+        # --- Ingresos por revisar: p. ej. el Bizum de los amigos tras pagar tú la cena ---
+        ingresos_sin_revisar = df[
+            (df["tipo"] == "ingreso") & ~df["descripcion"].isin(AJUSTES["ingresos_revisados"])
+        ]
+        resumen_ing = ingresos_sin_revisar.groupby("descripcion").agg(
+            n=("monto", "size"), total=("monto", "sum"), ultima=("fecha", "max")
+        ).sort_values("ultima", ascending=False)  # Los más recientes primero
+
+        if not resumen_ing.empty:
+            n_vis_ing = st.session_state.get("ing_visibles", 10)  # Pocos cada vez (rendimiento)
+            with st.expander(f"💶 {len(resumen_ing)} ingreso(s) por revisar — ¿alguno es una devolución?"):
+                st.caption(
+                    "Si alguien te devolvió dinero de un gasto (por ejemplo, un Bizum por la cena), "
+                    "márcalo como devolución: restará de esa categoría y no contará como ingreso."
+                )
+                for desc, fila in resumen_ing.head(n_vis_ing).iterrows():
+                    ultima = fecha_corta(fila["ultima"])
+                    if fila["n"] == 1:
+                        detalle = f"+{fila['total']:,.2f} € · {ultima}"
+                    else:
+                        detalle = f"{fila['n']} movimientos · +{fila['total']:,.2f} € en total · último el {ultima}"
+                    st.markdown(f"**{desc}**")
+                    st.caption(detalle)
+                    with st.container(horizontal=True, vertical_alignment="center"):
+                        cat_dev = st.selectbox(
+                            "Devolución de", AJUSTES["categorias"], key=f"dev_{desc}",
+                            label_visibility="collapsed",
+                        )
+                        if st.button("Es devolución", key=f"devbtn_{desc}"):
+                            AJUSTES["devoluciones"][desc] = cat_dev
+                            st.rerun()
+                    with st.container(horizontal=True):
+                        if st.button("Es un ingreso", key=f"ingok_{desc}",
+                                     help="Se queda como ingreso y no se vuelve a preguntar"):
+                            AJUSTES["ingresos_revisados"].append(desc)
+                            st.rerun()
+                        if st.button("No contar", key=f"ingexc_{desc}",
+                                     help="No cuenta en ningún cálculo (p. ej. traspasos entre tus cuentas)"):
+                            AJUSTES["excluir_descripciones"].append(desc)
+                            st.rerun()
+                    st.divider()
+
+                restantes_ing = len(resumen_ing) - n_vis_ing
+                if restantes_ing > 0:
+                    st.button(
+                        f"Mostrar {min(10, restantes_ing)} más (quedan {restantes_ing})", key="ing_mas",
+                        on_click=lambda: st.session_state.update(ing_visibles=n_vis_ing + 10),
+                    )
+
         ingresos  = df_mes[df_mes["tipo"] == "ingreso"]["monto"].sum()
-        gastos    = abs(df_mes[df_mes["tipo"] == "gasto"]["monto"].sum())
+        gastos    = max(0.0, -df_mes[df_mes["tipo"] == "gasto"]["monto"].sum())  # Ya resta devoluciones
         balance   = ingresos - gastos
         ahorro    = round((balance / ingresos * 100), 1) if ingresos > 0 else 0.0
 
@@ -633,8 +687,8 @@ with tab1:
 
         # Gastos fijos (categorías marcadas en Categorías → Editar categorías) y variables
         gastos_mes = df_mes[df_mes["tipo"] == "gasto"]
-        fijos = abs(gastos_mes[gastos_mes["categoria"].isin(AJUSTES["fijas"])]["monto"].sum())
-        variables = gastos - fijos
+        fijos = max(0.0, -gastos_mes[gastos_mes["categoria"].isin(AJUSTES["fijas"])]["monto"].sum())
+        variables = max(0.0, gastos - fijos)
         pct_fijos = round(fijos / gastos * 100) if gastos > 0 else 0
         _metricas([
             (f"Fijos ({pct_fijos} %)",           f"{fijos:,.2f} €",     None),
@@ -670,7 +724,7 @@ with tab1:
         with col_top:
             st.markdown("**Top 5 comercios**")
             top5 = (
-                df_mes[df_mes["tipo"] == "gasto"]
+                df_mes[(df_mes["tipo"] == "gasto") & (df_mes["monto"] < 0)]
                 .groupby("descripcion")["monto"]
                 .sum()
                 .abs()
@@ -756,7 +810,8 @@ with tab2:
             movs_sel = df_p[(df_p["mes"] == mes_sel) & (df_p["tipo"] == tipo_sel)]
             titulo = "Ingresos" if tipo_sel == "ingreso" else "Gastos"
             with st.container(horizontal=True, vertical_alignment="center"):
-                st.markdown(f"**{titulo} de {_mes(mes_sel)} · {abs(movs_sel['monto'].sum()):,.2f} €**")
+                total_sel = movs_sel['monto'].sum() if tipo_sel == "ingreso" else max(0.0, -movs_sel['monto'].sum())
+                st.markdown(f"**{titulo} de {_mes(mes_sel)} · {total_sel:,.2f} €**")
                 if st.button("Quitar selección", key="hist_quitar"):
                     st.session_state["hist_reinicio"] = st.session_state.get("hist_reinicio", 0) + 1
                     st.rerun()
@@ -785,7 +840,8 @@ with tab3:
         st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
     else:
         df_c = df_p[df_p["tipo"] == "gasto"]
-        por_cat = df_c.groupby("categoria")["monto"].sum().abs().sort_values(ascending=False)
+        por_cat = (-df_c.groupby("categoria")["monto"].sum()).clip(lower=0)  # Resta devoluciones
+        por_cat = por_cat[por_cat > 0].sort_values(ascending=False)
 
         col_chart, col_list = st.columns([1, 1])
 
@@ -960,6 +1016,7 @@ with tab3:
         for clave, titulo, boton in (
             ("excluir_descripciones", "Comercios que no cuentan", "Volver a contar"),
             ("ignorados", "Comercios ignorados en el aviso de sin clasificar", "Volver a preguntar"),
+            ("ingresos_revisados", "Ingresos marcados como «es un ingreso»", "Volver a preguntar"),
         ):
             if AJUSTES[clave]:
                 st.caption(f"{titulo} ({len(AJUSTES[clave])})")
@@ -967,6 +1024,22 @@ with tab3:
                     elegido = st.selectbox(titulo, sorted(AJUSTES[clave]), key=f"sel_{clave}",
                                            label_visibility="collapsed")
                     st.button(boton, key=f"quitar_{clave}", on_click=_quitar, args=(clave, elegido))
+
+        # --- Devoluciones (se marcan en el aviso de ingresos por revisar del Dashboard) ---
+        def _quitar_devolucion(desc: str):
+            AJUSTES["devoluciones"].pop(desc, None)
+
+        if AJUSTES["devoluciones"]:
+            st.markdown("**Devoluciones**")
+            st.caption("Ingresos que restan de una categoría en vez de contar como ingreso.")
+            with st.container(horizontal=True, vertical_alignment="center"):
+                elegida = st.selectbox(
+                    "Devoluciones", sorted(AJUSTES["devoluciones"]), key="sel_devoluciones",
+                    format_func=lambda d: f"{d} → {AJUSTES['devoluciones'].get(d, '')}",
+                    label_visibility="collapsed",
+                )
+                st.button("Quitar", key="quitar_devolucion", help="Vuelve a ser un ingreso normal",
+                          on_click=_quitar_devolucion, args=(elegida,))
 
 
 # ═══════════════════════════════════════════════

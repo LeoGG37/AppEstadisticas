@@ -13,6 +13,9 @@ import plotly.graph_objects as go
 # antiguo (daba ImportError con funciones nuevas). Releerlo no hace llamadas al banco.
 import data
 importlib.reload(data)
+import enable_banking
+if getattr(enable_banking, "__file__", None):  # Solo se relee si viene de un archivo
+    importlib.reload(enable_banking)
 
 from data import (  # noqa: E402
     parse_eb_transactions,
@@ -233,6 +236,21 @@ def _desde_cuenta(entrada: dict) -> str | None:
     if entrada.get("obtenido"):  # Datos guardados antes de llevar la cuenta de "desde"
         return (entrada["obtenido"].date() - timedelta(days=DIAS_HISTORIAL)).isoformat()
     return None
+
+
+def _rellenar_historial(entrada: dict, movimientos: list, desde: str | None, obtenido=None) -> None:
+    """Añade movimientos antiguos (de una copia o de la descarga completa) a una cuenta.
+
+    Lo que ya hay en memoria es lo más reciente y manda en su franja; de 'movimientos'
+    solo se toma lo anterior a esa franja, así no se duplica nada.
+    """
+    if entrada.get("raw"):
+        desde_mem = _desde_cuenta(entrada)
+        entrada["raw"] = combinar_historial(movimientos, entrada["raw"], desde_mem)
+        if desde:
+            entrada["desde"] = min(desde_mem, desde)
+    else:
+        entrada.update(raw=movimientos, desde=desde, obtenido=obtenido)
 
 
 def _mes(periodo, corto: bool = False) -> str:
@@ -849,7 +867,10 @@ with tab5:
                         st.session_state["new_credentials"] = {
                             "session_id": new_session_id,
                             "accounts": accounts,
+                            # Desde ahora hay ~1 h para pedir todo el historial
+                            "autorizado": datetime.now(timezone.utc),
                         }
+                        st.session_state.pop("descarga_completa", None)
                         st.query_params.clear()
                         st.session_state.pop("oauth_state", None)
                         st.session_state.pop("auth_url", None)
@@ -866,29 +887,98 @@ with tab5:
     elif st.session_state.get("new_credentials"):
         creds = st.session_state["new_credentials"]
         accounts = creds.get("accounts", [])
+        # La API puede devolver cada cuenta como texto (solo el uid) o como objeto
+        nuevos_uids = [a if isinstance(a, str) else a.get("uid", "") for a in accounts]
         st.success("¡Autorización completada!")
-        st.markdown("**Copia estos valores en los Secrets de Streamlit Cloud (dentro de `[enable_banking]`):**")
 
-        # Construir bloque TOML con session_id + un account_uid por cuenta
-        lines = [f'session_id = "{creds["session_id"]}"']
-        for i, acc in enumerate(accounts):
-            uid = acc.get("uid", "")
-            tipo = acc.get("account_type") or acc.get("name") or f"Cuenta {i + 1}"
-            suffix = f"_{i + 1}" if len(accounts) > 1 else ""
-            lines.append(f'# {tipo}')
-            lines.append(f'account_uid{suffix} = "{uid}"')
+        # --- Paso 1: todo el historial (el banco solo lo permite ~1 h tras autorizar) ---
+        st.markdown("**1. Descarga todo tu historial**")
+        autorizado = creds.get("autorizado")
+        transcurrido = (datetime.now(timezone.utc) - autorizado).total_seconds() // 60 if autorizado else 60
+        minutos_restantes = max(0, 60 - int(transcurrido))
+        resultado = st.session_state.get("descarga_completa")
 
-        st.code("\n".join(lines), language="toml")
+        for r in resultado or []:
+            linea = f"**{r['cuenta']}**: {r['movimientos']} movimientos"
+            if r["desde"]:
+                linea += f" desde el {fecha_corta(date.fromisoformat(r['desde']))}"
+            linea += f" · {r['peticiones']} peticiones al banco"
+            if r["problema"]:
+                st.warning(f"{linea}\n\nIncompleta: {r['problema']}. Lo descargado se ha guardado igualmente.")
+            else:
+                st.success(linea)
+
+        hay_problemas = any(r["problema"] for r in resultado or [])
+        if minutos_restantes > 0 and (not resultado or hay_problemas):
+            st.caption(
+                "El banco solo deja pedir todo el historial durante ~1 hora tras autorizar. "
+                f"Quedan unos {minutos_restantes} minutos. Puede tardar un poco: no cierres la página."
+            )
+            if st.button("Reintentar la descarga" if resultado else "Descargar todo el historial", type="primary"):
+                import enable_banking as eb
+                alm_desc, bloqueo_desc = _almacen()
+                resumen = []
+                with st.spinner("Descargando todo el historial…"):
+                    for i, uid in enumerate(nuevos_uids):
+                        if i > 0:
+                            time.sleep(2.0)  # Pausa entre cuentas para no saturar la API
+                        movs, peticiones, problema = eb.get_all_transactions(_eb_app_id, _eb_key, uid)
+                        movs = [reducir_movimiento(t) for t in movs]
+                        fechas = sorted(
+                            f for t in movs
+                            if (f := t.get("booking_date") or t.get("value_date") or t.get("transaction_date"))
+                        )
+                        desde = fechas[0][:10] if fechas else None
+                        with bloqueo_desc:
+                            ent = alm_desc.setdefault(
+                                uid, {"raw": None, "obtenido": None, "desde": None, "ultimo_intento": None, "error": None}
+                            )
+                            # Solo si terminó bien se sabe que los datos llegan hasta hoy
+                            _rellenar_historial(ent, movs, desde,
+                                                obtenido=datetime.now(timezone.utc) if problema is None else None)
+                        if problema is None:
+                            motivo = None
+                        elif problema == "tope":
+                            motivo = "se alcanzó el tope de peticiones"
+                        else:
+                            motivo = _motivo_error(problema, uid)
+                            print(f"[descarga completa] Fallo: {motivo}", flush=True)
+                        resumen.append({"cuenta": f"Cuenta {i + 1}", "movimientos": len(movs), "desde": desde,
+                                        "peticiones": peticiones, "problema": motivo})
+                st.session_state["descarga_completa"] = resumen
+                st.rerun()
+        elif not resultado:
+            st.warning(
+                "Ha pasado más de una hora desde que autorizaste: para descargar todo el historial "
+                "habría que renovar la conexión otra vez."
+            )
+
+        # --- Paso 2: copia antes de tocar los Secrets ---
         st.markdown(
-            "Ve a **Streamlit Cloud → tu app → Settings → Secrets** "
-            "y añade estos valores dentro de `[enable_banking]`."
+            "**2. Descarga la copia de seguridad** en el desplegable *💾 Copia de seguridad* de más abajo. "
+            "Hazlo **antes** del paso 3: al cambiar los Secrets la app se reinicia y se vacía la memoria."
         )
-        st.caption(
-            "💡 Los `account_uid` son permanentes — no cambian aunque renueves la conexión. "
-            "Solo necesitarás actualizar `session_id` cada ~180 días."
-        )
+
+        # --- Paso 3: Secrets ---
+        st.markdown("**3. Copia estos valores en los Secrets de Streamlit Cloud** (dentro de `[enable_banking]`):")
+        if set(nuevos_uids) == set(_eb_account_uids):
+            st.caption("✅ Los identificadores de cuenta no han cambiado: basta con actualizar `session_id`.")
+        else:
+            st.warning("⚠️ Los identificadores de cuenta han cambiado: actualiza también los `account_uid`.")
+        lines = [f'session_id = "{creds["session_id"]}"']
+        for i, (acc, uid) in enumerate(zip(accounts, nuevos_uids)):
+            tipo = (acc.get("account_type") or acc.get("name")) if isinstance(acc, dict) else None
+            suffix = f"_{i + 1}" if len(accounts) > 1 else ""
+            lines.append(f'# {tipo or f"Cuenta {i + 1}"}')
+            lines.append(f'account_uid{suffix} = "{uid}"')
+        st.code("\n".join(lines), language="toml")
+        st.caption("Streamlit Cloud → tu app → Settings → Secrets.")
+
+        # --- Paso 4: restaurar ---
+        st.markdown("**4. Cuando la app se reinicie, sube la copia** en *💾 Copia de seguridad*.")
         if st.button("Listo"):
             st.session_state.pop("new_credentials", None)
+            st.session_state.pop("descarga_completa", None)
             st.rerun()
 
     # --- Banco ya conectado ---
@@ -966,15 +1056,7 @@ with tab5:
                         ent = _alm_copia.setdefault(
                             uid, {"raw": None, "obtenido": None, "desde": None, "ultimo_intento": None, "error": None}
                         )
-                        if ent.get("raw"):
-                            # Lo que ya hay en memoria es más reciente en su franja; de la copia se
-                            # recupera todo lo anterior a esa franja
-                            desde_mem = _desde_cuenta(ent)
-                            ent["raw"] = combinar_historial(cuenta["movimientos"], ent["raw"], desde_mem)
-                            if cuenta["desde"]:
-                                ent["desde"] = min(desde_mem, cuenta["desde"])
-                        else:
-                            ent.update(raw=cuenta["movimientos"], desde=cuenta["desde"], obtenido=obtenido)
+                        _rellenar_historial(ent, cuenta["movimientos"], cuenta["desde"], obtenido=obtenido)
                     recuperados = sum(len(e.get("raw") or []) for e in _alm_copia.values()) - antes
                 st.session_state["copia_ok"] = (
                     f"Copia aplicada: {len(ajustes_copia['categorias'])} categorías restauradas y "

@@ -140,3 +140,42 @@ def get_transactions(
         all_txns.extend(data.get("transactions", []))
 
     return all_txns
+
+
+def get_all_transactions(
+    application_id: str,
+    private_key_pem: str,
+    account_uid: str,
+    max_peticiones: int = 200,
+) -> tuple:
+    """Pide todo el historial que permita el banco (strategy=longest).
+
+    Solo funciona bien en la ~1 h siguiente a autorizar. Mientras busca el inicio,
+    la API puede devolver páginas vacías con continuation_key: hay que seguir pidiendo.
+    Devuelve (movimientos, peticiones, problema): problema es None si terminó bien,
+    "tope" si se alcanzó max_peticiones, o la excepción si falló a mitad. En los dos
+    últimos casos los movimientos son los descargados hasta ese momento.
+    """
+    token = _make_jwt(application_id, private_key_pem)
+    params = {"strategy": "longest"}
+    movimientos, peticiones = [], 0
+    try:
+        while True:
+            resp = requests.get(
+                f"{API_URL}/accounts/{account_uid}/transactions",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+                timeout=60,
+            )
+            peticiones += 1
+            resp.raise_for_status()
+            data = resp.json()
+            movimientos.extend(data.get("transactions", []))
+            clave = data.get("continuation_key")
+            if not clave:
+                return movimientos, peticiones, None
+            if peticiones >= max_peticiones:
+                return movimientos, peticiones, "tope"
+            params["continuation_key"] = clave
+    except Exception as e:
+        return movimientos, peticiones, e

@@ -31,7 +31,7 @@ from data import (  # noqa: E402
     borrar_categoria,
     aplicar_ajustes,
     sugerir_palabra_clave,
-    coincide,
+    normalizar,
     anadir_regla,
     borrar_regla,
     reducir_movimiento,
@@ -255,6 +255,7 @@ def _rellenar_historial(entrada: dict, movimientos: list, desde: str | None, obt
             entrada["desde"] = min(desde_mem, desde)
     else:
         entrada.update(raw=movimientos, desde=desde, obtenido=obtenido)
+    entrada["version"] = entrada.get("version", 0) + 1  # Hay que reprocesar
 
 
 def _mes(periodo, corto: bool = False) -> str:
@@ -338,6 +339,7 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
                     # Historial acumulado: los últimos 89 días se sustituyen, lo anterior se conserva
                     desde_previo = _desde_cuenta(entrada)
                     entrada["raw"] = combinar_historial(entrada["raw"], nuevos, date_from)
+                    entrada["version"] = entrada.get("version", 0) + 1  # Hay que reprocesar
                     entrada["desde"] = min(desde_previo, date_from) if desde_previo else date_from
                     entrada["obtenido"] = ahora
                     entrada["error"] = None
@@ -349,9 +351,27 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
             if entrada["obtenido"] is None or ahora - entrada["obtenido"] > CADUCIDAD_DATOS:
                 sin_actualizar.append((uid, entrada["obtenido"], entrada["error"]))
 
-        raw_total = [t for uid in account_uids for t in (almacen[uid]["raw"] or [])]
+        # Procesar miles de movimientos es lo costoso: solo se repite si han cambiado
+        # (nueva consulta, copia subida o descarga completa sube la versión de la cuenta)
+        clave = tuple(
+            (uid, almacen[uid].get("version", 0), len(almacen[uid]["raw"] or [])) for uid in account_uids
+        )
+        procesados = _procesados()
+        if clave not in procesados:
+            raw_total = [t for uid in account_uids for t in (almacen[uid]["raw"] or [])]
+            procesados.clear()  # Solo se guarda la última combinación de cuentas
+            procesados[clave] = parse_eb_transactions(raw_total)
+        df_procesado = procesados[clave]
 
-    return parse_eb_transactions(raw_total), sin_actualizar
+    return df_procesado, sin_actualizar
+
+
+# ⚠️ NO MODIFICAR NI UNA LETRA DE ESTA FUNCIÓN (tampoco su docstring): por la misma razón
+# que _almacen. Si se vaciara no se pierde nada: solo se vuelve a procesar una vez.
+@st.cache_resource
+def _procesados() -> dict:
+    """Movimientos ya procesados, por combinación de cuentas y versión de sus datos."""
+    return {}
 
 # ⚠️ NO MODIFICAR NI UNA LETRA DE ESTA FUNCIÓN (tampoco su docstring): Streamlit identifica
 # esta memoria por el texto de la función y, si cambia, la vacía al hacer push (se pierden
@@ -508,22 +528,29 @@ with tab1:
 
         # --- Notificación de transacciones sin clasificar (de todo el historial, no solo del periodo) ---
         movs_sin_clasificar = df[(df["categoria"] == "Otros") & (df["tipo"] == "gasto")]
-        sin_clasificar = movs_sin_clasificar["descripcion"].unique()
+        # Un resumen por comercio, de más a menos gasto (se calcula de una vez para todos)
+        resumen_sc = movs_sin_clasificar.groupby("descripcion").agg(
+            n=("monto", "size"), total=("monto", "sum"), ultima=("fecha", "max")
+        )
+        resumen_sc["total"] = resumen_sc["total"].abs()
+        resumen_sc = resumen_sc.sort_values("total", ascending=False)
 
-        if len(sin_clasificar) > 0:
-            # Todos los gastos, para contar a cuántos afectaría cada palabra clave
-            descs_gastos = df.loc[df["tipo"] == "gasto", "descripcion"]
-            descs_unicas = descs_gastos.unique()
-            with st.expander(f"⚠️ {len(sin_clasificar)} comercio(s) sin clasificar — pulsa para asignarles una categoría"):
-                for desc in sin_clasificar:
+        if not resumen_sc.empty:
+            # Solo se muestran unos pocos cada vez: cada comercio son 3 controles y con todo el
+            # historial puede haber cientos, lo que hacía muy lenta cada recarga
+            n_visibles = st.session_state.get("sc_visibles", 10)
+            # Para contar a cuántos afectaría cada palabra clave (limpiando cada texto una sola vez)
+            movs_por_desc = df.loc[df["tipo"] == "gasto", "descripcion"].value_counts().to_dict()
+            textos_limpios = {d: f" {normalizar(d)} " for d in movs_por_desc}
+            with st.expander(f"⚠️ {len(resumen_sc)} comercio(s) sin clasificar — pulsa para asignarles una categoría"):
+                st.caption("Ordenados de más a menos gasto.")
+                for desc, fila in resumen_sc.head(n_visibles).iterrows():
                     # Importe y fecha para reconocer el movimiento (o total y último, si hay varios)
-                    movs_desc = movs_sin_clasificar[movs_sin_clasificar["descripcion"] == desc]
-                    total = abs(movs_desc["monto"].sum())
-                    ultima = fecha_corta(movs_desc["fecha"].max())
-                    if len(movs_desc) == 1:
-                        detalle = f"{total:,.2f} € · {ultima}"
+                    ultima = fecha_corta(fila["ultima"])
+                    if fila["n"] == 1:
+                        detalle = f"{fila['total']:,.2f} € · {ultima}"
                     else:
-                        detalle = f"{len(movs_desc)} movimientos · {total:,.2f} € en total · último el {ultima}"
+                        detalle = f"{fila['n']} movimientos · {fila['total']:,.2f} € en total · último el {ultima}"
                     st.markdown(f"**{desc}**")
                     st.caption(detalle)
 
@@ -534,8 +561,9 @@ with tab1:
                         placeholder="Vacío: solo este comercio",
                     ).strip()
                     if palabra:
-                        parecidos = [d for d in descs_unicas if coincide(d, palabra)]
-                        n_movs = int(descs_gastos.isin(parecidos).sum())
+                        buscada = f" {normalizar(palabra)} "
+                        parecidos = [d for d, texto in textos_limpios.items() if buscada in texto]
+                        n_movs = sum(movs_por_desc[d] for d in parecidos)
                         st.caption(f"Afectaría a {n_movs} movimientos de {len(parecidos)} comercio(s).")
 
                     # Selector y botón en la misma fila, también en el móvil
@@ -555,6 +583,13 @@ with tab1:
                             # Este comercio queda clasificado aunque la palabra no aparezca en su texto
                             AJUSTES["clasificaciones"][desc] = cat_elegida
                             st.rerun()
+
+                restantes = len(resumen_sc) - n_visibles
+                if restantes > 0:
+                    st.button(
+                        f"Mostrar {min(10, restantes)} más (quedan {restantes})", key="sc_mas",
+                        on_click=lambda: st.session_state.update(sc_visibles=n_visibles + 10),
+                    )
 
         ingresos  = df_mes[df_mes["tipo"] == "ingreso"]["monto"].sum()
         gastos    = abs(df_mes[df_mes["tipo"] == "gasto"]["monto"].sum())

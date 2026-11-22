@@ -187,7 +187,8 @@ def borrar_regla(ajustes: dict, palabra: str) -> None:
 
 def categoria_por_reglas(descripcion: str, reglas: list) -> str | None:
     """Categoría de la regla que coincide; si hay varias, la de la palabra más larga (más concreta)."""
-    coincidentes = [r for r in reglas if coincide(descripcion, r["palabra"])]
+    texto = f" {normalizar(descripcion)} "  # Se limpia una vez; las palabras ya se guardan limpias
+    coincidentes = [r for r in reglas if f" {r['palabra']} " in texto]
     if not coincidentes:
         return None
     return max(coincidentes, key=lambda r: len(r["palabra"]))["categoria"]
@@ -505,6 +506,7 @@ def importar_copia(contenido: bytes) -> tuple:
 def parse_eb_transactions(raw: list) -> pd.DataFrame:
     """Convierte la respuesta de Enable Banking al DataFrame interno."""
     rows = []
+    categoria_de = {}  # Cada comercio se clasifica una sola vez, aunque tenga muchos movimientos
     for t in raw:
         try:
             amount = float(t["transaction_amount"]["amount"])
@@ -542,19 +544,29 @@ def parse_eb_transactions(raw: list) -> pd.DataFrame:
         if not fecha_str:
             continue
 
+        if tipo == "gasto" and desc not in categoria_de:
+            categoria_de[desc] = categorize(desc)
         rows.append({
-            "fecha":       pd.to_datetime(fecha_str),
+            "fecha":       fecha_str,
             "monto":       monto,
             "descripcion": desc,
-            "categoria":   categorize(desc) if tipo == "gasto" else "Ingreso",
+            "categoria":   categoria_de[desc] if tipo == "gasto" else "Ingreso",
             "recurrente":  False,
             "tipo":        tipo,
         })
 
+    columnas = ["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"]
     if not rows:
-        return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
+        return pd.DataFrame(columns=columnas)
 
     df = pd.DataFrame(rows)
+    # Todas las fechas de golpe (una a una era lo más lento). Solo el día, tal como lo escribe
+    # el banco: así un movimiento a las 00:30 no cambia de mes por la zona horaria.
+    # Las que no se entiendan se descartan.
+    df["fecha"] = pd.to_datetime(df["fecha"].astype(str).str[:10], format="%Y-%m-%d", errors="coerce")
+    df = df.dropna(subset=["fecha"])
+    if df.empty:
+        return pd.DataFrame(columns=columnas)
     df["mes"] = df["fecha"].dt.to_period("M")
     return df.sort_values("fecha", ascending=False).reset_index(drop=True)
 

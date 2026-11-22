@@ -282,6 +282,9 @@ def _motivo_error(e: Exception, uid: str) -> str:
     return texto.replace(uid, "…")[:150]  # Nunca mostrar el identificador de la cuenta
 
 
+# ⚠️ NO MODIFICAR NI UNA LETRA DE ESTA FUNCIÓN (tampoco su docstring): Streamlit identifica
+# esta memoria por el texto de la función y, si cambia, la vacía al hacer push (se pierden
+# los movimientos en memoria). Los comentarios de encima, como este, sí se pueden cambiar.
 @st.cache_resource
 def _almacen() -> tuple:
     """Memoria compartida del servidor: {uid: {"raw", "obtenido", "desde", "ultimo_intento", "error"}}.
@@ -346,6 +349,9 @@ def load_data(account_uids: tuple, forzar: bool = False) -> tuple:
 
     return parse_eb_transactions(raw_total), sin_actualizar
 
+# ⚠️ NO MODIFICAR NI UNA LETRA DE ESTA FUNCIÓN (tampoco su docstring): Streamlit identifica
+# esta memoria por el texto de la función y, si cambia, la vacía al hacer push (se pierden
+# las categorías). Los comentarios de encima, como este, sí se pueden cambiar.
 @st.cache_resource
 def _ajustes() -> dict:
     """Categorías y clasificaciones del usuario, compartidas por todas las sesiones.

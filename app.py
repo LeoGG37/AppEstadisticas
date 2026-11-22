@@ -123,6 +123,33 @@ def _fila(izquierda: str, derecha: str, color_derecha: str = "inherit") -> str:
         f'<div class="fila-der" style="color:{color_derecha}">{derecha}</div></div>'
     )
 
+
+def _lista_movimientos(movs: pd.DataFrame, limite: int = 100, pista: str = "") -> None:
+    """Pinta una lista de movimientos en un único bloque HTML (más rápido en el móvil)."""
+    filas = []
+    for _, row in movs.head(limite).iterrows():
+        es_ingreso = row["tipo"] == "ingreso"
+        color_monto = COLORS["balance_pos"] if es_ingreso else COLORS["balance_neg"]
+        signo = "+" if es_ingreso else "−"
+        etiquetas = ""
+        if row["recurrente"]:
+            etiquetas += '<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;">recurrente</span>'
+        if es_ingreso:
+            etiquetas += '<span class="etiqueta" style="background:#EAF3DE;color:#3B6D11;">ingreso</span>'
+
+        # La descripción viene del banco: se escapa para que no pueda inyectar HTML
+        izquierda = (
+            f'{html.escape(row["descripcion"])}{etiquetas}'
+            f'<div class="fila-sub">{fecha_corta(row["fecha"])}'
+            f' · {html.escape(str(row["categoria"]))}</div>'
+        )
+        filas.append(_fila(izquierda, f'{signo}{abs(row["monto"]):,.2f} €', color_monto))
+
+    if filas:
+        st.markdown("".join(filas), unsafe_allow_html=True)
+    if len(movs) > limite:
+        st.caption(f"Mostrando {limite} de {len(movs)} movimientos. {pista}".strip())
+
 # --- Credenciales Enable Banking ---
 try:
     _eb_cfg     = st.secrets.get("enable_banking", {})
@@ -566,9 +593,32 @@ with tab2:
         # y pone marcas cada ~30 días (salían "Aug 1" y "Aug 31")
         fig.update_xaxes(fixedrange=True, type="category")
         fig.update_yaxes(fixedrange=True)
-        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        # Tocar una barra la selecciona (solo por toque o clic: arrastrar sigue desactivado).
+        # Cambiar la clave del gráfico es la forma de quitar la selección.
+        evento = st.plotly_chart(
+            fig, width="stretch", config=PLOTLY_CONFIG,
+            on_select="rerun", selection_mode="points",
+            key=f"hist_{st.session_state.get('hist_reinicio', 0)}",
+        )
         if MES_PARCIAL in resumen.index:
             st.caption(f"\\* {nombre_mes(MES_PARCIAL)}: mes incompleto, solo incluye sus últimos días.")
+
+        # --- Movimientos de la barra tocada ---
+        puntos = evento.selection.points if evento else []
+        if puntos:
+            punto = puntos[0]
+            mes_sel = resumen.index[punto.get("point_index", punto.get("point_number", 0))]
+            tipo_sel = "ingreso" if punto.get("curve_number") == 0 else "gasto"  # 0 = barra de Ingresos
+            movs_sel = df_p[(df_p["mes"] == mes_sel) & (df_p["tipo"] == tipo_sel)]
+            titulo = "Ingresos" if tipo_sel == "ingreso" else "Gastos"
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.markdown(f"**{titulo} de {_mes(mes_sel)} · {abs(movs_sel['monto'].sum()):,.2f} €**")
+                if st.button("Quitar selección", key="hist_quitar"):
+                    st.session_state["hist_reinicio"] = st.session_state.get("hist_reinicio", 0) + 1
+                    st.rerun()
+            _lista_movimientos(movs_sel)
+        else:
+            st.caption("Toca una barra para ver sus movimientos.")
 
         st.divider()
 
@@ -768,31 +818,7 @@ with tab4:
 
     st.caption(f"{len(df_t)} transacciones")
 
-    # Toda la lista en un único bloque HTML: más rápido de pintar en el móvil
-    filas = []
-    for _, row in df_t.head(100).iterrows():
-        es_ingreso = row["tipo"] == "ingreso"
-        color_monto = COLORS["balance_pos"] if es_ingreso else COLORS["balance_neg"]
-        signo = "+" if es_ingreso else "−"
-        etiquetas = ""
-        if row["recurrente"]:
-            etiquetas += '<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;">recurrente</span>'
-        if es_ingreso:
-            etiquetas += '<span class="etiqueta" style="background:#EAF3DE;color:#3B6D11;">ingreso</span>'
-
-        # La descripción viene del banco: se escapa para que no pueda inyectar HTML
-        izquierda = (
-            f'{html.escape(row["descripcion"])}{etiquetas}'
-            f'<div class="fila-sub">{fecha_corta(row["fecha"])}'
-            f' · {html.escape(str(row["categoria"]))}</div>'
-        )
-        filas.append(_fila(izquierda, f'{signo}{abs(row["monto"]):,.2f} €', color_monto))
-
-    if filas:
-        st.markdown("".join(filas), unsafe_allow_html=True)
-
-    if len(df_t) > 100:
-        st.caption(f"Mostrando 100 de {len(df_t)} transacciones. Usa los filtros para acotar.")
+    _lista_movimientos(df_t, pista="Usa los filtros para acotar.")
 
 
 # ═══════════════════════════════════════════════

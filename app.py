@@ -1,4 +1,5 @@
 import html
+import importlib
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -8,7 +9,12 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-from data import (
+# Tras un push, Streamlit Cloud recarga app.py pero puede conservar en memoria el data.py
+# antiguo (daba ImportError con funciones nuevas). Releerlo no hace llamadas al banco.
+import data
+importlib.reload(data)
+
+from data import (  # noqa: E402
     parse_eb_transactions,
     monthly_summary,
     COLORS,

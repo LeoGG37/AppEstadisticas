@@ -34,6 +34,7 @@ from data import (  # noqa: E402
     normalizar,
     anadir_regla,
     borrar_regla,
+    anadir_exclusion_palabra,
     reducir_movimiento,
     combinar_historial,
     exportar_copia,
@@ -141,6 +142,8 @@ def _lista_movimientos(movs: pd.DataFrame, limite: int = 100, pista: str = "") -
         color_monto = COLORS["balance_pos"] if es_ingreso else COLORS["balance_neg"]
         signo = "+" if es_ingreso else "−"
         etiquetas = ""
+        if row.get("excluido"):
+            etiquetas += '<span class="etiqueta" style="background:#EEEDE9;color:#6B6A66;">no cuenta</span>'
         if row["recurrente"]:
             etiquetas += '<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;">recurrente</span>'
         if es_ingreso:
@@ -390,6 +393,8 @@ AJUSTES = _ajustes()
 # Los ajustes que ya estaban en memoria antes de existir los gastos fijos no traen la lista
 AJUSTES.setdefault("fijas", [c for c in DEFAULT_FIJAS if c in AJUSTES["categorias"]])
 AJUSTES.setdefault("reglas", [])  # Ídem para las reglas por palabra clave
+for _clave in ("ignorados", "excluir_descripciones", "excluir_palabras"):  # Ídem
+    AJUSTES.setdefault(_clave, [])
 
 # --- Título ---
 st.title("Mis Gastos")
@@ -456,6 +461,10 @@ if _sin_actualizar:
 
 # Aplicar cambios de nombre y clasificaciones manuales del usuario
 df = aplicar_ajustes(df, AJUSTES)
+# Los movimientos marcados como "no contar" (p. ej. traspasos entre tus cuentas) se quedan
+# fuera de todos los cálculos; solo se ven en Transacciones, marcados
+df_completo = df
+df = df[~df["excluido"]]
 
 # --- Selector de periodo (común a todas las pestañas) ---
 MESES_POR_DEFECTO = 4  # El mes actual y los 3 anteriores
@@ -482,8 +491,10 @@ if _meses_disp:
         )
 
     df_p = df[(df["mes"] >= periodo_desde) & (df["mes"] <= periodo_hasta)]
+    df_p_completo = df_completo[(df_completo["mes"] >= periodo_desde) & (df_completo["mes"] <= periodo_hasta)]
 else:
     df_p = df  # Sin datos: las pestañas muestran su aviso
+    df_p_completo = df_completo
 
 
 def _mostrar_enlace_auth(app_id, private_key):
@@ -527,7 +538,10 @@ with tab1:
         df_mes = df_p  # Movimientos del periodo elegido
 
         # --- Notificación de transacciones sin clasificar (de todo el historial, no solo del periodo) ---
-        movs_sin_clasificar = df[(df["categoria"] == "Otros") & (df["tipo"] == "gasto")]
+        movs_sin_clasificar = df[
+            (df["categoria"] == "Otros") & (df["tipo"] == "gasto")
+            & ~df["descripcion"].isin(AJUSTES["ignorados"])  # Los ignorados ya no se preguntan
+        ]
         # Un resumen por comercio, de más a menos gasto (se calcula de una vez para todos)
         resumen_sc = movs_sin_clasificar.groupby("descripcion").agg(
             n=("monto", "size"), total=("monto", "sum"), ultima=("fecha", "max")
@@ -583,6 +597,18 @@ with tab1:
                             # Este comercio queda clasificado aunque la palabra no aparezca en su texto
                             AJUSTES["clasificaciones"][desc] = cat_elegida
                             st.rerun()
+
+                    # Si no se quiere clasificar: que deje de preguntarse, o que no cuente en nada
+                    with st.container(horizontal=True):
+                        if st.button("Ignorar", key=f"ign_{desc}",
+                                     help="Sigue contando como «Otros», pero deja de aparecer aquí"):
+                            AJUSTES["ignorados"].append(desc)
+                            st.rerun()
+                        if st.button("No contar", key=f"exc_{desc}",
+                                     help="No cuenta en ningún cálculo (p. ej. traspasos entre tus cuentas)"):
+                            AJUSTES["excluir_descripciones"].append(desc)
+                            st.rerun()
+                    st.divider()
 
                 restantes = len(resumen_sc) - n_visibles
                 if restantes > 0:
@@ -890,6 +916,58 @@ with tab3:
                     on_click=borrar_regla, args=(AJUSTES, regla["palabra"]),
                 )
 
+        # --- Movimientos que no cuentan y comercios ignorados ---
+        def _quitar(clave: str, valor: str):
+            if valor in AJUSTES[clave]:
+                AJUSTES[clave].remove(valor)
+
+        def _al_excluir_palabra():
+            error = anadir_exclusion_palabra(AJUSTES, st.session_state["excl_palabra"])
+            st.session_state["error_excl"] = error
+            if not error:
+                st.session_state["excl_palabra"] = ""
+
+        st.markdown("**Movimientos que no cuentan**")
+        st.caption(
+            "No suman en métricas, gráficos ni categorías (por ejemplo, traspasos entre tus "
+            "cuentas). Siguen viéndose en Transacciones, marcados como «no cuenta»."
+        )
+        excl_palabra = st.text_input(
+            "No contar los movimientos (gastos e ingresos) que contengan:",
+            key="excl_palabra", placeholder="Por ejemplo: traspaso",
+        ).strip()
+        if excl_palabra:
+            buscada = f" {normalizar(excl_palabra)} "
+            textos = {d: f" {normalizar(d)} " for d in df_completo["descripcion"].unique()}
+            afectados = df_completo[df_completo["descripcion"].map(lambda d: buscada in textos[d])]
+            n_gastos = int((afectados["tipo"] == "gasto").sum())
+            st.caption(
+                f"Afectaría a {len(afectados)} movimientos ({n_gastos} gastos y "
+                f"{len(afectados) - n_gastos} ingresos)."
+            )
+            st.button("No contar", key="excl_anadir", on_click=_al_excluir_palabra)
+        error_excl = st.session_state.pop("error_excl", None)
+        if error_excl:
+            st.error(error_excl)
+
+        for palabra_excl in AJUSTES["excluir_palabras"]:
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.markdown(f"Contienen «{html.escape(palabra_excl)}»")
+                st.button("✕", key=f"exclp_{palabra_excl}", help="Volver a contarlos",
+                          on_click=_quitar, args=("excluir_palabras", palabra_excl))
+
+        # Un desplegable y un botón (y no un botón por comercio): la lista puede crecer mucho
+        for clave, titulo, boton in (
+            ("excluir_descripciones", "Comercios que no cuentan", "Volver a contar"),
+            ("ignorados", "Comercios ignorados en el aviso de sin clasificar", "Volver a preguntar"),
+        ):
+            if AJUSTES[clave]:
+                st.caption(f"{titulo} ({len(AJUSTES[clave])})")
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    elegido = st.selectbox(titulo, sorted(AJUSTES[clave]), key=f"sel_{clave}",
+                                           label_visibility="collapsed")
+                    st.button(boton, key=f"quitar_{clave}", on_click=_quitar, args=(clave, elegido))
+
 
 # ═══════════════════════════════════════════════
 # TAB 4 — TRANSACCIONES
@@ -902,7 +980,7 @@ with tab4:
         cat_filtro = st.selectbox("Categoría", cats_disponibles, label_visibility="collapsed")
         tipo_filtro = st.selectbox("Tipo", ["Todos", "Gasto", "Ingreso"], label_visibility="collapsed")
 
-    df_t = df_p.copy()  # Movimientos del periodo elegido
+    df_t = df_p_completo.copy()  # Movimientos del periodo elegido, también los que no cuentan
     if busqueda:
         df_t = df_t[df_t["descripcion"].str.contains(busqueda, case=False, na=False)]
     if cat_filtro != "Todas":

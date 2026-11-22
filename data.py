@@ -95,7 +95,10 @@ INCOME_KEYWORDS = ["nomina", "nómina", "transferencia recibida", "bizum recibid
 #              "clasificaciones": {descripción: cat},   # asignadas a mano
 #              "renombradas": {cat_automática: cat_actual},  # renombradas o borradas
 #              "fijas": [...],  # categorías de gasto fijo; el resto cuenta como variable
-#              "reglas": [{"palabra": "mercadona", "categoria": "Alimentación"}, ...]}
+#              "reglas": [{"palabra": "mercadona", "categoria": "Alimentación"}, ...],
+#              "ignorados": [descripción, ...],             # no se preguntan en el aviso
+#              "excluir_descripciones": [descripción, ...], # no cuentan en ningún cálculo
+#              "excluir_palabras": ["traspaso", ...]}       # ídem, por palabra clave
 
 CATEGORIA_OTROS = "Otros"      # Destino de lo no clasificado: no se puede renombrar ni borrar
 # Gasto fijo = lo que se paga sí o sí cada mes, aunque el importe cambie (p. ej. el supermercado)
@@ -123,6 +126,9 @@ def ajustes_por_defecto() -> dict:
         "renombradas": {},
         "fijas": DEFAULT_FIJAS.copy(),
         "reglas": [],
+        "ignorados": [],
+        "excluir_descripciones": [],
+        "excluir_palabras": [],
     }
 
 
@@ -183,6 +189,28 @@ def anadir_regla(ajustes: dict, palabra: str, categoria: str) -> str | None:
 
 def borrar_regla(ajustes: dict, palabra: str) -> None:
     ajustes["reglas"] = [r for r in ajustes["reglas"] if r["palabra"] != palabra]
+
+
+def anadir_exclusion_palabra(ajustes: dict, palabra: str) -> str | None:
+    """Los movimientos que contengan 'palabra' (gastos e ingresos) dejan de contar."""
+    palabra = normalizar(palabra)
+    if not MIN_LONG_PALABRA <= len(palabra) <= MAX_LONG_PALABRA:
+        return f"La palabra debe tener entre {MIN_LONG_PALABRA} y {MAX_LONG_PALABRA} caracteres."
+    if palabra not in ajustes["excluir_palabras"]:
+        if len(ajustes["excluir_palabras"]) >= MAX_REGLAS:
+            return f"Como máximo puede haber {MAX_REGLAS} palabras."
+        ajustes["excluir_palabras"].append(palabra)
+    return None
+
+
+def descripciones_excluidas(descripciones, ajustes: dict) -> set:
+    """Descripciones que no cuentan: marcadas una a una o que contienen una palabra excluida."""
+    exactas = set(ajustes.get("excluir_descripciones", []))
+    palabras = [f" {p} " for p in ajustes.get("excluir_palabras", [])]
+    return {
+        d for d in set(descripciones)
+        if d in exactas or (palabras and any(p in f" {normalizar(d)} " for p in palabras))
+    }
 
 
 def categoria_por_reglas(descripcion: str, reglas: list) -> str | None:
@@ -284,6 +312,8 @@ def aplicar_ajustes(df: pd.DataFrame, ajustes: dict) -> pd.DataFrame:
         categorias = categorias.where(de_reglas.isna(), de_reglas)
     manuales = descripciones.map(ajustes["clasificaciones"])
     df.loc[gastos, "categoria"] = categorias.where(manuales.isna(), manuales)
+    # Movimientos que no cuentan en los cálculos (p. ej. traspasos entre cuentas propias)
+    df["excluido"] = df["descripcion"].isin(descripciones_excluidas(df["descripcion"].unique(), ajustes))
     return df
 
 
@@ -346,6 +376,27 @@ def validar_ajustes(datos) -> dict:
     ):
         raise ValueError("Las reglas por palabra clave guardadas no son válidas.")
 
+    # Ignorados y excluidos (las copias anteriores no los traen)
+    def _lista_textos(clave: str, maximo: int, valido) -> list:
+        valor = datos.get(clave, [])
+        if not isinstance(valor, list) or len(valor) > maximo or not all(
+            isinstance(x, str) and valido(x) for x in valor
+        ):
+            raise ValueError(f"El apartado «{clave}» de los ajustes guardados no es válido.")
+        return list(dict.fromkeys(valor))  # Sin repetidos, conservando el orden
+
+    def _descripcion_valida(d: str) -> bool:
+        return 0 < len(d) <= MAX_LONG_DESCRIPCION
+
+    ignorados = _lista_textos("ignorados", MAX_CLASIFICACIONES, _descripcion_valida)
+    excluir_descripciones = _lista_textos("excluir_descripciones", MAX_CLASIFICACIONES, _descripcion_valida)
+    excluir_palabras = [
+        normalizar(p) for p in _lista_textos(
+            "excluir_palabras", MAX_REGLAS,
+            lambda p: MIN_LONG_PALABRA <= len(normalizar(p)) <= MAX_LONG_PALABRA,
+        )
+    ]
+
     resultado = {
         "categorias": list(categorias),
         "colores": {c: colores[c] for c in categorias if c in colores},
@@ -353,6 +404,9 @@ def validar_ajustes(datos) -> dict:
         "renombradas": dict(renombradas),
         "fijas": list(fijas),
         "reglas": [{"palabra": normalizar(r["palabra"]), "categoria": r["categoria"]} for r in reglas],
+        "ignorados": ignorados,
+        "excluir_descripciones": excluir_descripciones,
+        "excluir_palabras": list(dict.fromkeys(excluir_palabras)),
     }
     for c in categorias:
         if c not in resultado["colores"]:

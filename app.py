@@ -502,14 +502,22 @@ with tab1:
         df_mes = df_p  # Movimientos del periodo elegido
 
         # --- Notificación de transacciones sin clasificar (de todo el historial, no solo del periodo) ---
-        sin_clasificar = df[
-            (df["categoria"] == "Otros") & (df["tipo"] == "gasto")
-        ]["descripcion"].unique()
+        movs_sin_clasificar = df[(df["categoria"] == "Otros") & (df["tipo"] == "gasto")]
+        sin_clasificar = movs_sin_clasificar["descripcion"].unique()
 
         if len(sin_clasificar) > 0:
             with st.expander(f"⚠️ {len(sin_clasificar)} comercio(s) sin clasificar — pulsa para asignarles una categoría"):
                 for desc in sin_clasificar:
+                    # Importe y fecha para reconocer el movimiento (o total y último, si hay varios)
+                    movs_desc = movs_sin_clasificar[movs_sin_clasificar["descripcion"] == desc]
+                    total = abs(movs_desc["monto"].sum())
+                    ultima = fecha_corta(movs_desc["fecha"].max())
+                    if len(movs_desc) == 1:
+                        detalle = f"{total:,.2f} € · {ultima}"
+                    else:
+                        detalle = f"{len(movs_desc)} movimientos · {total:,.2f} € en total · último el {ultima}"
                     st.markdown(f"**{desc}**")
+                    st.caption(detalle)
                     # Selector y botón en la misma fila, también en el móvil
                     with st.container(horizontal=True, vertical_alignment="center"):
                         cat_elegida = st.selectbox(

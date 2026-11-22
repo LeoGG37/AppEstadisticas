@@ -1,5 +1,6 @@
 import json
 import re
+import unicodedata
 from datetime import datetime
 
 import pandas as pd
@@ -93,7 +94,8 @@ INCOME_KEYWORDS = ["nomina", "nómina", "transferencia recibida", "bizum recibid
 # Estructura: {"categorias": [...], "colores": {cat: "#rrggbb"},
 #              "clasificaciones": {descripción: cat},   # asignadas a mano
 #              "renombradas": {cat_automática: cat_actual},  # renombradas o borradas
-#              "fijas": [...]}  # categorías de gasto fijo; el resto cuenta como variable
+#              "fijas": [...],  # categorías de gasto fijo; el resto cuenta como variable
+#              "reglas": [{"palabra": "mercadona", "categoria": "Alimentación"}, ...]}
 
 CATEGORIA_OTROS = "Otros"      # Destino de lo no clasificado: no se puede renombrar ni borrar
 # Gasto fijo = lo que se paga sí o sí cada mes, aunque el importe cambie (p. ej. el supermercado)
@@ -107,6 +109,9 @@ MAX_CATEGORIAS = 50
 MAX_LONG_NOMBRE = 40
 MAX_CLASIFICACIONES = 5000
 MAX_LONG_DESCRIPCION = 300
+MAX_REGLAS = 500
+MIN_LONG_PALABRA = 3   # Palabras más cortas ("sa", "es") agruparían de más
+MAX_LONG_PALABRA = 60
 _COLOR_VALIDO = re.compile(r"^#[0-9a-fA-F]{6}$")  # Evita inyectar CSS a través del color
 
 
@@ -117,7 +122,75 @@ def ajustes_por_defecto() -> dict:
         "clasificaciones": {},
         "renombradas": {},
         "fijas": DEFAULT_FIJAS.copy(),
+        "reglas": [],
     }
+
+
+# ═══════════════════════════════════════════════
+# REGLAS POR PALABRA CLAVE
+# ═══════════════════════════════════════════════
+
+def normalizar(texto: str) -> str:
+    """Minúsculas, sin tildes y solo letras/números separados por un espacio."""
+    sin_tildes = unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", sin_tildes.lower()).split())
+
+
+# Partes del texto del banco que no identifican al comercio
+_PREFIJOS = ["compra tarjeta", "compra tarj", "pago movil", "pago tarjeta", "transaccion contactless",
+             "compra", "pago", "contactless", "recibo", "adeudo", "cargo", "tarjeta", "tarj"]
+_IGNORAR = {"es", "sa", "sl", "slu", "sau", "de", "del", "la", "el", "los", "las", "y", "en",
+            "www", "com", "the", "eu", "esp", "spain"}
+# Movimientos donde lo que sigue suele ser el nombre de una persona: no se sugiere nada
+_SIN_SUGERENCIA = {"bizum", "transferencia", "traspaso"}
+
+
+def sugerir_palabra_clave(descripcion: str) -> str:
+    """Propone la palabra que identifica al comercio (p. ej. 'mercadona'), o '' si no conviene."""
+    texto = normalizar(descripcion)
+    if _SIN_SUGERENCIA & set(texto.split()):
+        return ""
+    for prefijo in _PREFIJOS:
+        if texto.startswith(prefijo + " "):
+            texto = texto[len(prefijo) + 1:]
+            break
+    for palabra in texto.split():
+        if len(palabra) >= MIN_LONG_PALABRA and not any(c.isdigit() for c in palabra) and palabra not in _IGNORAR:
+            return palabra
+    return ""
+
+
+def coincide(descripcion: str, palabra: str) -> bool:
+    """La palabra (o frase) aparece como palabras completas: 'bar' no coincide con 'barcelona'."""
+    return f" {normalizar(palabra)} " in f" {normalizar(descripcion)} "
+
+
+def anadir_regla(ajustes: dict, palabra: str, categoria: str) -> str | None:
+    """Crea (o actualiza) la regla 'palabra → categoría'. Devuelve el motivo si no es válida."""
+    palabra = normalizar(palabra)
+    if len(palabra) < MIN_LONG_PALABRA:
+        return f"La palabra clave debe tener al menos {MIN_LONG_PALABRA} letras."
+    if len(palabra) > MAX_LONG_PALABRA:
+        return f"La palabra clave puede tener como máximo {MAX_LONG_PALABRA} caracteres."
+    if categoria not in ajustes["categorias"]:
+        return "Esa categoría no existe."
+    reglas = [r for r in ajustes["reglas"] if r["palabra"] != palabra]
+    if len(reglas) >= MAX_REGLAS:
+        return f"Como máximo puede haber {MAX_REGLAS} reglas."
+    ajustes["reglas"] = reglas + [{"palabra": palabra, "categoria": categoria}]
+    return None
+
+
+def borrar_regla(ajustes: dict, palabra: str) -> None:
+    ajustes["reglas"] = [r for r in ajustes["reglas"] if r["palabra"] != palabra]
+
+
+def categoria_por_reglas(descripcion: str, reglas: list) -> str | None:
+    """Categoría de la regla que coincide; si hay varias, la de la palabra más larga (más concreta)."""
+    coincidentes = [r for r in reglas if coincide(descripcion, r["palabra"])]
+    if not coincidentes:
+        return None
+    return max(coincidentes, key=lambda r: len(r["palabra"]))["categoria"]
 
 
 def _color_libre(ajustes: dict) -> str:
@@ -179,6 +252,9 @@ def renombrar_categoria(ajustes: dict, viejo: str, nuevo: str) -> str | None:
     ajustes["categorias"][ajustes["categorias"].index(viejo)] = nuevo
     ajustes["colores"][nuevo] = ajustes["colores"].pop(viejo, COLORS["neutral"])  # Conserva su color
     ajustes["fijas"] = [nuevo if c == viejo else c for c in ajustes["fijas"]]     # y si es fija
+    for regla in ajustes["reglas"]:                                               # y sus reglas
+        if regla["categoria"] == viejo:
+            regla["categoria"] = nuevo
     _redirigir(ajustes, viejo, nuevo)
     return None
 
@@ -189,17 +265,24 @@ def borrar_categoria(ajustes: dict, nombre: str) -> str | None:
     ajustes["categorias"].remove(nombre)
     ajustes["colores"].pop(nombre, None)
     ajustes["fijas"] = [c for c in ajustes["fijas"] if c != nombre]
+    ajustes["reglas"] = [r for r in ajustes["reglas"] if r["categoria"] != nombre]
     _redirigir(ajustes, nombre, CATEGORIA_OTROS)  # Sus movimientos pasan a "Otros"
     return None
 
 
 def aplicar_ajustes(df: pd.DataFrame, ajustes: dict) -> pd.DataFrame:
-    """Aplica a los gastos los cambios de nombre y las clasificaciones manuales."""
+    """Aplica a los gastos, por este orden: cambios de nombre, reglas por palabra clave y
+    clasificaciones manuales de un comercio concreto (la más concreta manda)."""
     df = df.copy()
     gastos = df["tipo"] == "gasto"
     categorias = df.loc[gastos, "categoria"].replace(ajustes["renombradas"])
-    manuales = df.loc[gastos, "descripcion"].map(ajustes["clasificaciones"])
-    df.loc[gastos, "categoria"] = categorias.where(manuales.isna(), manuales)  # Lo manual manda
+    descripciones = df.loc[gastos, "descripcion"]
+    if ajustes.get("reglas"):
+        por_regla = {d: categoria_por_reglas(d, ajustes["reglas"]) for d in descripciones.unique()}
+        de_reglas = descripciones.map(por_regla)
+        categorias = categorias.where(de_reglas.isna(), de_reglas)
+    manuales = descripciones.map(ajustes["clasificaciones"])
+    df.loc[gastos, "categoria"] = categorias.where(manuales.isna(), manuales)
     return df
 
 
@@ -252,12 +335,23 @@ def validar_ajustes(datos) -> dict:
     else:
         fijas = [c for c in DEFAULT_FIJAS if c in categorias]
 
+    # Las copias anteriores a las reglas por palabra clave no las traen
+    reglas = datos.get("reglas", [])
+    if not isinstance(reglas, list) or len(reglas) > MAX_REGLAS or not all(
+        isinstance(r, dict) and isinstance(r.get("palabra"), str) and isinstance(r.get("categoria"), str)
+        and MIN_LONG_PALABRA <= len(normalizar(r["palabra"])) <= MAX_LONG_PALABRA
+        and r["categoria"] in categorias
+        for r in reglas
+    ):
+        raise ValueError("Las reglas por palabra clave guardadas no son válidas.")
+
     resultado = {
         "categorias": list(categorias),
         "colores": {c: colores[c] for c in categorias if c in colores},
         "clasificaciones": dict(clasificaciones),
         "renombradas": dict(renombradas),
         "fijas": list(fijas),
+        "reglas": [{"palabra": normalizar(r["palabra"]), "categoria": r["categoria"]} for r in reglas],
     }
     for c in categorias:
         if c not in resultado["colores"]:

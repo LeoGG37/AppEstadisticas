@@ -30,6 +30,10 @@ from data import (  # noqa: E402
     renombrar_categoria,
     borrar_categoria,
     aplicar_ajustes,
+    sugerir_palabra_clave,
+    coincide,
+    anadir_regla,
+    borrar_regla,
     reducir_movimiento,
     combinar_historial,
     exportar_copia,
@@ -365,6 +369,7 @@ def _ajustes() -> dict:
 AJUSTES = _ajustes()
 # Los ajustes que ya estaban en memoria antes de existir los gastos fijos no traen la lista
 AJUSTES.setdefault("fijas", [c for c in DEFAULT_FIJAS if c in AJUSTES["categorias"]])
+AJUSTES.setdefault("reglas", [])  # Ídem para las reglas por palabra clave
 
 # --- Título ---
 st.title("Mis Gastos")
@@ -506,6 +511,9 @@ with tab1:
         sin_clasificar = movs_sin_clasificar["descripcion"].unique()
 
         if len(sin_clasificar) > 0:
+            # Todos los gastos, para contar a cuántos afectaría cada palabra clave
+            descs_gastos = df.loc[df["tipo"] == "gasto", "descripcion"]
+            descs_unicas = descs_gastos.unique()
             with st.expander(f"⚠️ {len(sin_clasificar)} comercio(s) sin clasificar — pulsa para asignarles una categoría"):
                 for desc in sin_clasificar:
                     # Importe y fecha para reconocer el movimiento (o total y último, si hay varios)
@@ -518,6 +526,18 @@ with tab1:
                         detalle = f"{len(movs_desc)} movimientos · {total:,.2f} € en total · último el {ultima}"
                     st.markdown(f"**{desc}**")
                     st.caption(detalle)
+
+                    # Palabra clave sugerida (editable): la regla clasifica también los parecidos
+                    palabra = st.text_input(
+                        "Aplicar también a todos los que contengan:",
+                        value=sugerir_palabra_clave(desc), key=f"kw_{desc}",
+                        placeholder="Vacío: solo este comercio",
+                    ).strip()
+                    if palabra:
+                        parecidos = [d for d in descs_unicas if coincide(d, palabra)]
+                        n_movs = int(descs_gastos.isin(parecidos).sum())
+                        st.caption(f"Afectaría a {n_movs} movimientos de {len(parecidos)} comercio(s).")
+
                     # Selector y botón en la misma fila, también en el móvil
                     with st.container(horizontal=True, vertical_alignment="center"):
                         cat_elegida = st.selectbox(
@@ -526,7 +546,13 @@ with tab1:
                             key=f"sc_{desc}",
                             label_visibility="collapsed",
                         )
-                        if st.button("Guardar", key=f"btn_{desc}"):
+                        guardar = st.button("Guardar", key=f"btn_{desc}")
+                    if guardar:
+                        error_regla = anadir_regla(AJUSTES, palabra, cat_elegida) if palabra else None
+                        if error_regla:
+                            st.error(error_regla)
+                        else:
+                            # Este comercio queda clasificado aunque la palabra no aparezca en su texto
                             AJUSTES["clasificaciones"][desc] = cat_elegida
                             st.rerun()
 
@@ -816,6 +842,18 @@ with tab3:
             default=AJUSTES["fijas"], key=clave_fijas, on_change=_al_cambiar_fijas,
             label_visibility="collapsed",
         )
+
+        # --- Reglas por palabra clave (se crean al clasificar en el Dashboard) ---
+        st.markdown("**Reglas por palabra clave**")
+        if not AJUSTES["reglas"]:
+            st.caption("Aún no hay reglas. Se crean al clasificar un comercio en el Dashboard.")
+        for regla in sorted(AJUSTES["reglas"], key=lambda r: r["palabra"]):
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.markdown(f"«{html.escape(regla['palabra'])}» → {html.escape(regla['categoria'])}")
+                st.button(
+                    "✕", key=f"regla_{regla['palabra']}", help=f"Borrar la regla «{regla['palabra']}»",
+                    on_click=borrar_regla, args=(AJUSTES, regla["palabra"]),
+                )
 
 
 # ═══════════════════════════════════════════════

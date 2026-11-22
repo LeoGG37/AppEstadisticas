@@ -26,6 +26,21 @@ CAT_COLORS = {
 
 DEFAULT_CATEGORIAS = list(CAT_COLORS.keys())
 
+# Nombres en español: strftime usa el idioma del servidor (inglés en Streamlit Cloud)
+MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
+         "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+
+def nombre_mes(periodo, corto: bool = False) -> str:
+    """'Agosto 2026', o 'Ago 2026' si corto, a partir de un periodo mensual o una fecha."""
+    nombre = MESES[periodo.month - 1]
+    return f"{nombre[:3] if corto else nombre} {periodo.year}"
+
+
+def fecha_corta(fecha) -> str:
+    """'17 nov 2026'."""
+    return f"{fecha.day} {MESES[fecha.month - 1][:3].lower()} {fecha.year}"
+
 # Reglas de clasificación por palabra clave.
 # Buscan en cualquier parte de la descripción, incluyendo formatos reales
 # del Santander como "COMPRA TARJETA *MERCADONA 0987 MADRID ES".

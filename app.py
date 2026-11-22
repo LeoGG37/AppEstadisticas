@@ -13,6 +13,8 @@ from data import (
     monthly_summary,
     COLORS,
     CATEGORIA_OTROS,
+    nombre_mes,
+    fecha_corta,
     ajustes_por_defecto,
     anadir_categoria,
     renombrar_categoria,
@@ -182,6 +184,15 @@ ZONA_ES = ZoneInfo("Europe/Madrid")     # El servidor de Streamlit Cloud funcion
 # Pasada ~1 h desde la autorización, muchos bancos solo dan los últimos 90 días; pedir
 # más devuelve WRONG_TRANSACTIONS_PERIOD. 89 deja un día de margen por la zona horaria.
 DIAS_HISTORIAL = 89
+
+# El primer mes del historial solo trae sus últimos días: se marca para que no confunda
+_inicio_historial = date.today() - timedelta(days=DIAS_HISTORIAL)
+MES_PARCIAL = pd.Period(_inicio_historial, freq="M") if _inicio_historial.day > 1 else None
+
+
+def _mes(periodo, corto: bool = False) -> str:
+    """Nombre del mes en español, con '(parcial)' si es el primer mes incompleto."""
+    return nombre_mes(periodo, corto) + (" (parcial)" if periodo == MES_PARCIAL else "")
 
 
 def _motivo_error(e: Exception, uid: str) -> str:
@@ -379,7 +390,7 @@ with tab1:
         mes_sel = st.selectbox(
             "Mes",
             meses,
-            format_func=lambda m: m.strftime("%B %Y").capitalize(),
+            format_func=_mes,
             label_visibility="collapsed",
         )
 
@@ -474,7 +485,8 @@ with tab2:
     if resumen.empty:
         st.caption("Sin datos. Conecta tu cuenta en la pestaña **Conexión**.")
     else:
-        etiquetas = [str(m) for m in resumen.index]
+        # "(parcial)" en una segunda línea para que las etiquetas no se inclinen en el móvil
+        etiquetas = [_mes(m, corto=True).replace(" (parcial)", "<br>(parcial)") for m in resumen.index]
         colores_gastos = [
             COLORS["balance_neg"] if d else COLORS["expense"]
             for d in resumen["deficit"]
@@ -507,7 +519,9 @@ with tab2:
             height=300,
             dragmode=False,
         )
-        fig.update_xaxes(fixedrange=True)
+        # Eje de categorías: una etiqueta por barra. Si no, Plotly lee "2026-08" como fecha
+        # y pone marcas cada ~30 días (salían "Aug 1" y "Aug 31")
+        fig.update_xaxes(fixedrange=True, type="category", tickangle=0)
         fig.update_yaxes(fixedrange=True)
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
@@ -518,7 +532,7 @@ with tab2:
         ahorro_total = resumen[resumen["balance"] > 0]["balance"].sum()
 
         _metricas([
-            ("Mejor mes",        mejor_mes.strftime("%B %Y").capitalize(), None),
+            ("Mejor mes",        _mes(mejor_mes), None),
             ("Meses en déficit", f"{int(meses_deficit)} de {len(resumen)}", None),
             ("Ahorro acumulado", f"{ahorro_total:,.0f} €", None),
         ], clase="tres")
@@ -535,7 +549,7 @@ with tab3:
         mes_c = st.selectbox(
             "Mes",
             meses_c,
-            format_func=lambda m: m.strftime("%B %Y").capitalize(),
+            format_func=_mes,
             label_visibility="collapsed",
             key="mes_categorias",
         )
@@ -702,7 +716,7 @@ with tab4:
         # La descripción viene del banco: se escapa para que no pueda inyectar HTML
         izquierda = (
             f'{html.escape(row["descripcion"])}{etiquetas}'
-            f'<div class="fila-sub">{row["fecha"].strftime("%d %b %Y").lstrip("0")}'
+            f'<div class="fila-sub">{fecha_corta(row["fecha"])}'
             f' · {html.escape(str(row["categoria"]))}</div>'
         )
         filas.append(_fila(izquierda, f'{signo}{abs(row["monto"]):,.2f} €', color_monto))

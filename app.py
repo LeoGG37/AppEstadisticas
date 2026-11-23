@@ -41,6 +41,8 @@ from data import (  # noqa: E402
     normalizar,
     anadir_regla,
     borrar_regla,
+    editar_regla,
+    comercios_fijados,
     anadir_exclusion_palabra,
     reducir_movimiento,
     combinar_historial,
@@ -115,6 +117,17 @@ footer {visibility: hidden;}
 .fila-der {white-space: nowrap; font-weight: 500;}
 .fila-sub {font-size: 12px; color: #898781;}
 .etiqueta {font-size: 10px; padding: 1px 6px; border-radius: 4px; margin-left: 6px;}
+
+/* Mapa de categorías (Categorías → Editar categorías) */
+.mapa {font-size: 14px; margin-top: 8px;}
+.mapa-grupo {font-size: 12px; font-weight: 600; color: #52514e; border-bottom: 1px solid #e3e2de;
+             padding-bottom: 2px; margin: 12px 0 2px;}
+.mapa-fila {display: flex; justify-content: space-between; gap: 12px; padding: 5px 4px; border-radius: 6px;}
+.mapa-sub {padding-left: 22px; color: #6b6a65; font-size: 13px;}
+.mapa-sel {background: #E6F1FB; color: #0C447C;}
+.mapa-n {font-size: 12px; color: #898781; white-space: nowrap;}
+.mapa-sel .mapa-n {color: #185FA5;}
+.mapa-punto {display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -199,7 +212,7 @@ def _panel_movimiento(mov: pd.Series, clave: str) -> None:
                 AJUSTES["excluir_descripciones"].remove(desc)
                 hecho = True
         elif mov.get("excluido"):
-            st.info("No cuenta por una palabra clave: se cambia en Categorías → Editar categorías.")
+            st.info("No cuenta por una palabra clave: se cambia en Categorías → Movimientos que no cuentan.")
         if desc in AJUSTES["devoluciones"]:
             st.info(f"Es una devolución de {AJUSTES['devoluciones'][desc]}.")
             if st.button("Quitar devolución", key=f"{clave}_quitardev"):
@@ -802,7 +815,7 @@ with tab1:
             ("Ahorro",   f"{ahorro:.1f}%",     None),
         ])
 
-        # Gastos fijos (categorías marcadas en Categorías → Editar categorías) y variables
+        # Gastos fijos (se marcan en la ficha de cada categoría, en Categorías) y variables
         gastos_mes = df_mes[df_mes["tipo"] == "gasto"]
         es_fijo = gastos_mes["categoria"].map(lambda c: principal(AJUSTES, c)).isin(AJUSTES["fijas"])
         fijos = max(0.0, -gastos_mes[es_fijo]["monto"].sum())  # La subcategoría hereda el grupo
@@ -1016,130 +1029,332 @@ with tab3:
 
         st.divider()
 
-    # --- Editor de categorías ---
-    # Los cambios se aplican en callbacks (on_change / on_click), que se ejecutan
-    # antes de repintar la página; así el campo de texto se puede vaciar sin bucles.
+    # --- Gestión de categorías: mapa + ficha ---
+    # Un mapa de solo texto (no cuesta nada al recargar) y una única ficha abierta cada vez: la app
+    # va igual de rápida tengas 10 o 40 categorías. Los cambios se aplican en callbacks (on_change /
+    # on_click), que se ejecutan antes de repintar la página; así los campos se pueden vaciar.
     def _al_anadir():
         st.session_state["error_cat"] = anadir_categoria(AJUSTES, st.session_state["nueva_cat"])
         st.session_state["nueva_cat"] = ""
 
-    def _al_renombrar(viejo: str):
-        clave = f"cat_{viejo}"
+    def _cerrar_ficha():
+        st.session_state["ficha_cat"] = None
+        st.session_state.pop("ficha_accion", None)
+        st.session_state.pop("regla_editando", None)
+
+    def _al_renombrar(viejo: str, clave: str):
         error = renombrar_categoria(AJUSTES, viejo, st.session_state[clave])
         st.session_state["error_cat"] = error
         if error:
             st.session_state[clave] = viejo  # Deshacer lo escrito
+        else:
+            st.session_state["ficha_cat"] = st.session_state[clave].strip()  # La ficha sigue abierta
 
-    def _al_borrar(nombre: str):
-        st.session_state["error_cat"] = borrar_categoria(AJUSTES, nombre)
+    def _al_cambiar_tipo(cat: str, clave: str):
+        elegido = st.session_state[clave]
+        if elegido == "Fijo" and cat not in AJUSTES["fijas"]:
+            AJUSTES["fijas"].append(cat)
+        elif elegido == "Variable" and cat in AJUSTES["fijas"]:
+            AJUSTES["fijas"].remove(cat)
+        # Tocar la opción ya marcada la desmarca: con una clave nueva se vuelve a pintar la real
+        st.session_state["tipo_reinicio"] = st.session_state.get("tipo_reinicio", 0) + 1
+
+    def _al_sacar(sub: str):
+        # Al salir se queda en el mismo grupo (fijo/variable) que tenía dentro de su padre
+        fija = principal(AJUSTES, sub) in AJUSTES["fijas"]
+        sacar_de_padre(AJUSTES, sub)
+        if fija and sub not in AJUSTES["fijas"]:
+            AJUSTES["fijas"].append(sub)
+        elif not fija and sub in AJUSTES["fijas"]:
+            AJUSTES["fijas"].remove(sub)
+
+    def _al_anadir_sub(padre: str, clave: str):
+        elegida = (st.session_state[clave] or "").strip()
+        st.session_state[clave] = None  # El desplegable vuelve a quedar vacío
+        if not elegida:
+            return
+        error = anadir_categoria(AJUSTES, elegida) if elegida not in AJUSTES["categorias"] else None
+        st.session_state["error_cat"] = error or poner_dentro(AJUSTES, elegida, padre)
+
+    def _al_meter_dentro(cat: str, clave: str):
+        padre = st.session_state[clave]
+        st.session_state[clave] = None
+        if padre:
+            st.session_state["error_cat"] = poner_dentro(AJUSTES, cat, padre)
+
+    def _al_elegir_regla(clave: str):
+        st.session_state["regla_editando"] = st.session_state[clave]
+        # Se deseleccionan todas las etiquetas: la regla elegida se ve en su editor
+        st.session_state["reglas_reinicio"] = st.session_state.get("reglas_reinicio", 0) + 1
+
+    def _al_guardar_regla(vieja: str):
+        error = editar_regla(
+            AJUSTES, vieja, st.session_state[f"ed_palabra_{vieja}"], st.session_state[f"ed_cat_{vieja}"],
+            mover_fijados=st.session_state.get(f"ed_mover_{vieja}", True),
+        )
+        st.session_state["error_regla"] = error
+        if not error:
+            st.session_state.pop("regla_editando", None)
+
+    def _al_borrar_regla(palabra: str):
+        borrar_regla(AJUSTES, palabra)
+        st.session_state.pop("regla_editando", None)
+
+    def _al_anadir_regla(cat: str):
+        clave = f"nueva_regla_{cat}"
+        palabra = normalizar(st.session_state[clave])
+        destino = st.session_state.get(f"nueva_regla_cat_{cat}") or cat
+        existente = next((r for r in AJUSTES["reglas"] if r["palabra"] == palabra), None)
+        if existente:  # anadir_regla la movería sin avisar: mejor que se edite a propósito
+            error = (f"Ya hay una regla «{palabra}» (en {etiqueta_categoria(AJUSTES, existente['categoria'])}). "
+                     "Para cambiarla, búscala en la ficha de esa categoría.")
+        else:
+            error = anadir_regla(AJUSTES, palabra, destino)
+        st.session_state["error_regla"] = error
+        if not error:
+            st.session_state[clave] = ""
+
+    def _al_eliminar(cat: str):
+        error = borrar_categoria(AJUSTES, cat)
+        st.session_state["error_cat"] = error
+        if not error:
+            _cerrar_ficha()
+
+    def _al_unir(origen: str, destino: str):
+        error = unir_categorias(AJUSTES, origen, destino)
+        st.session_state["error_cat"] = error
+        if not error:
+            st.session_state.pop("ficha_accion", None)
+            st.session_state["ficha_cat"] = None if destino == CATEGORIA_OTROS else destino
+
+    _textos_gasto = {}  # Texto limpio de cada comercio → nº de gastos (se calcula solo si hace falta)
+
+    def _movs_con(palabra: str) -> int:
+        """Gastos de todo el historial cuyo texto contiene la palabra (o frase) completa."""
+        if not _textos_gasto:
+            for d, n in df_completo.loc[df_completo["tipo"] == "gasto", "descripcion"].value_counts().items():
+                texto = f" {normalizar(d)} "
+                _textos_gasto[texto] = _textos_gasto.get(texto, 0) + int(n)
+        buscada = f" {normalizar(palabra)} "
+        return sum(n for texto, n in _textos_gasto.items() if buscada in texto)
+
+    def _editor_regla(regla: dict):
+        """Cambiar la palabra o la categoría de una regla, o borrarla."""
+        vieja, cat_vieja = regla["palabra"], regla["categoria"]
+        with st.container(border=True):
+            st.markdown(f"**Regla «{html.escape(vieja)}»**")
+            palabra = st.text_input("Palabra", value=vieja, key=f"ed_palabra_{vieja}")
+            todas = categorias_ordenadas(AJUSTES)
+            cat_nueva = st.selectbox("Categoría", todas, index=todas.index(cat_vieja), key=f"ed_cat_{vieja}",
+                                     format_func=_fmt_cat)
+            nueva = normalizar(palabra)
+            if nueva and nueva != vieja:
+                st.caption(f"Movimientos con «{vieja}»: {_movs_con(vieja)} · con «{nueva}»: {_movs_con(nueva)}")
+            else:
+                st.caption(f"{_movs_con(vieja)} movimientos contienen «{vieja}».")
+            fijados = comercios_fijados(AJUSTES, vieja, cat_vieja)
+            if cat_nueva != cat_vieja and fijados:
+                st.checkbox(
+                    "Mover también " + ("el comercio clasificado" if len(fijados) == 1
+                                        else f"los {len(fijados)} comercios clasificados") + " a mano con esta palabra",
+                    value=True, key=f"ed_mover_{vieja}",
+                    help="Lo clasificado a mano manda sobre las reglas: si no se mueve, se queda donde estaba",
+                )
+            with st.container(horizontal=True):
+                st.button("Guardar", type="primary", key=f"ed_guardar_{vieja}", on_click=_al_guardar_regla, args=(vieja,))
+                st.button("Borrar regla", key=f"ed_borrar_{vieja}", on_click=_al_borrar_regla, args=(vieja,))
+                st.button("Cancelar", key=f"ed_cancelar_{vieja}",
+                          on_click=lambda: st.session_state.pop("regla_editando", None))
+
+    def _ficha_categoria(cat: str):
+        """Todo lo de una categoría en un sitio. Solo se pinta la ficha abierta (rapidez)."""
+        padres = AJUSTES["padres"]
+        padre = padres.get(cat)
+        subs = subcategorias(AJUSTES, cat)
+        es_gasto = df_completo["tipo"] == "gasto"
+        n_movs = int((es_gasto & df_completo["categoria"].isin([cat] + subs)).sum())
+
+        with st.container(border=True):
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.markdown(f"**{html.escape(_fmt_cat(cat))}**")
+                st.button("Cerrar", key="ficha_cerrar", on_click=_cerrar_ficha)
+            st.caption(f"{n_movs} movimientos en todo el historial" + (" (con sus subcategorías)" if subs else ""))
+
+            clave_nombre = f"ficha_nombre_{cat}"
+            if clave_nombre not in st.session_state:
+                st.session_state[clave_nombre] = cat  # Valor inicial del campo (sin usar value=)
+            st.text_input("Nombre", key=clave_nombre, on_change=_al_renombrar, args=(cat, clave_nombre))
+
+            if padre:
+                grupo = "fijo" if padre in AJUSTES["fijas"] else "variable"
+                st.caption(f"Es una subcategoría de «{padre}»: cuenta como gasto {grupo}, igual que ella.")
+                st.button(f"Sacar de «{padre}»", key="ficha_sacar", on_click=_al_sacar, args=(cat,),
+                          help="Vuelve a ser una categoría principal (no se borra nada)")
+            else:
+                clave_tipo = f"ficha_tipo_{cat}_{st.session_state.get('tipo_reinicio', 0)}"
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    st.markdown("Tipo de gasto")
+                    st.segmented_control(
+                        "Tipo de gasto", ["Fijo", "Variable"], key=clave_tipo, label_visibility="collapsed",
+                        default="Fijo" if cat in AJUSTES["fijas"] else "Variable",
+                        on_change=_al_cambiar_tipo, args=(cat, clave_tipo),
+                    )
+
+                # Subcategorías: tocar una la saca (no la borra); el desplegable crea o mete una
+                st.caption("Subcategorías" + (" · toca una para sacarla (no se borra)" if subs else ""))
+                if subs:
+                    with st.container(horizontal=True):
+                        for s in subs:
+                            st.button(f"{s} ✕", key=f"ficha_sacar_{s}", on_click=_al_sacar, args=(s,),
+                                      help=f"Sacar «{s}»: vuelve a ser categoría principal")
+                candidatas = [c for c in AJUSTES["categorias"] if c not in (CATEGORIA_OTROS, cat)
+                              and c not in padres and not subcategorias(AJUSTES, c)]
+                clave_sub = f"ficha_nuevasub_{cat}"
+                st.selectbox(
+                    "Añadir subcategoría", candidatas, index=None, key=clave_sub, accept_new_options=True,
+                    placeholder="+ Nueva subcategoría o elige una existente", label_visibility="collapsed",
+                    on_change=_al_anadir_sub, args=(cat, clave_sub),
+                )
+                if not subs:  # Solo hay dos niveles: una categoría con subcategorías no puede ir dentro de otra
+                    clave_dentro = f"ficha_dentro_{cat}"
+                    st.selectbox(
+                        "Meter dentro de", [c for c in AJUSTES["categorias"]
+                                            if c not in (CATEGORIA_OTROS, cat) and c not in padres],
+                        index=None, key=clave_dentro, placeholder="Meter dentro de otra categoría…",
+                        label_visibility="collapsed", on_change=_al_meter_dentro, args=(cat, clave_dentro),
+                    )
+
+            # --- Reglas por palabra clave (las suyas y las de sus subcategorías), plegadas ---
+            reglas_de = {c: sorted(r["palabra"] for r in AJUSTES["reglas"] if r["categoria"] == c)
+                         for c in [cat] + subs}
+            n_reglas = sum(len(v) for v in reglas_de.values())
+            # Un interruptor y no un desplegable: lo de dentro solo se construye al abrirlo (rapidez)
+            if st.toggle(f"Reglas por palabra clave ({n_reglas})", key=f"ficha_ver_reglas_{cat}"):
+                reinicio = st.session_state.get("reglas_reinicio", 0)
+                for c in [cat] + subs:
+                    if not reglas_de[c]:
+                        continue
+                    if subs:
+                        st.caption(c if c == cat else f"› {c}")
+                    clave_p = f"pills_reglas_{c}_{reinicio}"
+                    st.pills(c, reglas_de[c], key=clave_p, label_visibility="collapsed",
+                             format_func=lambda p: f"«{p}»", on_change=_al_elegir_regla, args=(clave_p,))
+                st.caption("Toca una regla para cambiarla, moverla o borrarla." if n_reglas
+                           else "Aún no tiene reglas.")
+
+                editando = st.session_state.get("regla_editando")
+                regla_ed = next((r for r in AJUSTES["reglas"]
+                                 if r["palabra"] == editando and r["categoria"] in [cat] + subs), None)
+                if regla_ed:
+                    _editor_regla(regla_ed)
+
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    texto = st.text_input("Nueva palabra clave", key=f"nueva_regla_{cat}",
+                                          placeholder="+ Añadir palabra clave", label_visibility="collapsed")
+                    if subs:
+                        st.selectbox("Para", [cat] + subs, key=f"nueva_regla_cat_{cat}",
+                                     label_visibility="collapsed", format_func=_fmt_cat)
+                    st.button("Añadir", key=f"nueva_regla_btn_{cat}", on_click=_al_anadir_regla, args=(cat,))
+                if texto.strip():
+                    st.caption(f"Afectaría a {_movs_con(texto)} movimientos.")
+                error_regla = st.session_state.pop("error_regla", None)
+                if error_regla:
+                    st.error(error_regla)
+
+            # --- Unir y eliminar, siempre con confirmación ---
+            accion = st.session_state.get("ficha_accion")
+            if accion == ("eliminar", cat):
+                propios = int((es_gasto & (df_completo["categoria"] == cat)).sum())
+                if padre:
+                    consecuencia = f"Sus {propios} movimientos y sus reglas pasan a «{padre}»."
+                else:
+                    partes = [f"sus {propios} movimientos pasan a «{CATEGORIA_OTROS}»"]
+                    if reglas_de[cat]:
+                        partes.append(f"se borran sus {len(reglas_de[cat])} reglas")
+                    if any(c == cat for c in AJUSTES["devoluciones"].values()):
+                        partes.append("sus devoluciones vuelven a ser ingresos")
+                    if subs:
+                        partes.append(", ".join(subs) + (" pasa" if len(subs) == 1 else " pasan")
+                                      + " a ser categoría principal")
+                    consecuencia = "; ".join(partes).capitalize() + "."
+                st.warning(f"¿Eliminar «{cat}»? {consecuencia}")
+                with st.container(horizontal=True):
+                    st.button("Sí, eliminar", type="primary", key="ficha_eliminar_si", on_click=_al_eliminar, args=(cat,))
+                    st.button("Cancelar", key="ficha_eliminar_no", on_click=lambda: st.session_state.pop("ficha_accion", None))
+            elif accion == ("unir", cat):
+                st.caption("Todo lo de esta categoría (movimientos, reglas y devoluciones) pasa a la que elijas, "
+                           "y esta se borra.")
+                destino = st.selectbox(
+                    f"Unir «{cat}» con", [c for c in categorias_ordenadas(AJUSTES) if c != cat], index=None,
+                    key="ficha_unir_destino", placeholder="Elige la categoría", format_func=_fmt_cat,
+                )
+                with st.container(horizontal=True):
+                    if destino:
+                        st.button(f"Unir con «{destino}»", type="primary", key="ficha_unir_si",
+                                  on_click=_al_unir, args=(cat, destino))
+                    st.button("Cancelar", key="ficha_unir_no", on_click=lambda: st.session_state.pop("ficha_accion", None))
+            else:
+                with st.container(horizontal=True):
+                    st.button("Unir con…", key="ficha_unir",
+                              on_click=lambda: st.session_state.update(ficha_accion=("unir", cat)))
+                    st.button("Eliminar", key="ficha_eliminar",
+                              on_click=lambda: st.session_state.update(ficha_accion=("eliminar", cat)))
+
+    def _mapa_categorias(seleccionada: str | None):
+        """Todas las categorías de un vistazo, en un solo bloque de texto (no son controles)."""
+        padres = AJUSTES["padres"]
+        n_reglas = {}
+        for regla in AJUSTES["reglas"]:
+            n_reglas[regla["categoria"]] = n_reglas.get(regla["categoria"], 0) + 1
+
+        def _reglas(n: int) -> str:
+            return "—" if n == 0 else ("1 regla" if n == 1 else f"{n} reglas")
+
+        principales = [c for c in AJUSTES["categorias"] if c not in padres]
+        filas = ""
+        for grupo, cats in (("Fijos", [c for c in principales if c in AJUSTES["fijas"]]),
+                            ("Variables", [c for c in principales if c not in AJUSTES["fijas"]])):
+            filas += f'<div class="mapa-grupo">{grupo}</div>'
+            if not cats:
+                filas += '<div class="mapa-fila mapa-sub">Ninguna</div>'
+            for c in cats:
+                subs = subcategorias(AJUSTES, c)
+                total = n_reglas.get(c, 0) + sum(n_reglas.get(s, 0) for s in subs)
+                color = AJUSTES["colores"].get(c, COLORS["neutral"])
+                filas += (
+                    f'<div class="mapa-fila{" mapa-sel" if c == seleccionada else ""}">'
+                    f'<span><span class="mapa-punto" style="background:{color}"></span>{html.escape(c)}</span>'
+                    f'<span class="mapa-n">{_reglas(total)}</span></div>'
+                )
+                for s in subs:
+                    filas += (
+                        f'<div class="mapa-fila mapa-sub{" mapa-sel" if s == seleccionada else ""}">'
+                        f'<span>› {html.escape(s)}</span><span class="mapa-n">{_reglas(n_reglas.get(s, 0))}</span></div>'
+                    )
+        st.markdown(f'<div class="mapa">{filas}</div>', unsafe_allow_html=True)
 
     with st.expander("Editar categorías"):
-        st.caption(
-            "Renombra, elimina o añade categorías. Al eliminar una, sus movimientos pasan a "
-            f"«{CATEGORIA_OTROS}», que no se puede cambiar."
-        )
         st.text_input(
-            "Nueva categoría", key="nueva_cat", on_change=_al_anadir,
-            placeholder="Escribe el nombre y pulsa Enter",
+            "Nueva categoría", key="nueva_cat", on_change=_al_anadir, label_visibility="collapsed",
+            placeholder="+ Nueva categoría (escribe el nombre y pulsa Enter)",
         )
         error_cat = st.session_state.pop("error_cat", None)
         if error_cat:
             st.error(error_cat)
 
-        for cat in list(AJUSTES["categorias"]):
-            bloqueada = cat == CATEGORIA_OTROS
-            clave = f"cat_{cat}"
-            if clave not in st.session_state:
-                st.session_state[clave] = cat  # Valor inicial del campo (sin usar value=)
-            # Nombre y botón de borrar en la misma fila, también en el móvil
-            with st.container(horizontal=True, vertical_alignment="center"):
-                st.text_input(
-                    cat, key=clave, label_visibility="collapsed",
-                    on_change=_al_renombrar, args=(cat,), disabled=bloqueada,
-                )
-                st.button(
-                    "✕", key=f"del_{cat}", help=f"Eliminar {cat}",
-                    on_click=_al_borrar, args=(cat,), disabled=bloqueada,
-                )
-
-        # --- Unir dos categorías: todo lo del origen pasa al destino y el origen se borra ---
-        def _al_unir(origen: str, destino: str):
-            st.session_state["error_cat"] = unir_categorias(AJUSTES, origen, destino)
-
-        st.markdown("**Unir categorías**")
-        st.caption("Todo lo de la primera (clasificaciones, reglas y devoluciones) pasa a la segunda, "
-                   "y la primera se borra.")
-        origenes = [c for c in AJUSTES["categorias"] if c != CATEGORIA_OTROS]
-        if len(origenes) >= 1 and len(AJUSTES["categorias"]) >= 2:
-            # Empiezan vacíos: así un toque accidental no puede borrar ninguna categoría
-            with st.container(horizontal=True, vertical_alignment="center"):
-                origen = st.selectbox("Unir", [c for c in categorias_ordenadas(AJUSTES) if c in origenes],
-                                      index=None, placeholder="Elige", key="unir_origen", format_func=_fmt_cat)
-                destino = st.selectbox("con", [c for c in categorias_ordenadas(AJUSTES) if c != origen],
-                                       index=None, placeholder="Elige", key="unir_destino", format_func=_fmt_cat)
-            if origen and destino:
-                st.button(f"Unir «{origen}» con «{destino}»", key="unir_boton",
-                          on_click=_al_unir, args=(origen, destino))
-
-        # --- Subcategorías: poner una categoría dentro de otra (dos niveles) ---
-        def _al_poner_dentro(sub: str, padre: str):
-            st.session_state["error_cat"] = poner_dentro(AJUSTES, sub, padre)
-
-        st.markdown("**Subcategorías**")
-        st.caption("Pon una categoría dentro de otra para ver el detalle (por ejemplo, Warhammer "
-                   "dentro de Ocio). Hereda si es fija o variable.")
-        padres_actuales = AJUSTES["padres"]
-        # Puede ser subcategoría la que no lo es ya ni tiene subcategorías; padre, la que no es subcategoría
-        candidatas_sub = [c for c in AJUSTES["categorias"] if c != CATEGORIA_OTROS
-                          and c not in padres_actuales and not subcategorias(AJUSTES, c)]
-        with st.container(horizontal=True, vertical_alignment="center"):
-            sub_elegida = st.selectbox("Poner", candidatas_sub, index=None, placeholder="Elige", key="sub_hija")
-            padre_elegido = st.selectbox(
-                "dentro de", [c for c in AJUSTES["categorias"] if c not in (CATEGORIA_OTROS, sub_elegida)
-                              and c not in padres_actuales],
-                index=None, placeholder="Elige", key="sub_padre",
-            )
-        if sub_elegida and padre_elegido:
-            st.button(f"Poner «{sub_elegida}» dentro de «{padre_elegido}»", key="sub_boton",
-                      on_click=_al_poner_dentro, args=(sub_elegida, padre_elegido))
-        for sub in [c for c in categorias_ordenadas(AJUSTES) if c in padres_actuales]:
-            with st.container(horizontal=True, vertical_alignment="center"):
-                st.markdown(html.escape(etiqueta_categoria(AJUSTES, sub)))
-                st.button("✕", key=f"sacar_{sub}", help=f"Sacar «{sub}» y que vuelva a ser categoría principal",
-                          on_click=sacar_de_padre, args=(AJUSTES, sub))
-
-        # --- Gastos fijos: botones que se marcan y desmarcan tocándolos ---
-        st.markdown("**¿Qué categorías son gastos fijos?**")
-        st.caption("Lo que pagas sí o sí cada mes, aunque el importe cambie. El resto cuenta como variable.")
-        # La clave cambia con las categorías y las fijas: así el widget nunca muestra un estado viejo
-        principales = [c for c in AJUSTES["categorias"] if c not in AJUSTES["padres"]]
-        clave_fijas = f"fijas_{hash((tuple(principales), tuple(AJUSTES['fijas'])))}"
-
-        def _al_cambiar_fijas():
-            marcadas = st.session_state[clave_fijas] or []
-            # Se conserva la marca propia de las subcategorías por si vuelven a ser principales
-            AJUSTES["fijas"] = ([c for c in principales if c in marcadas]
-                                + [c for c in AJUSTES["fijas"] if c in AJUSTES["padres"]])
-
-        st.pills(
-            "Gastos fijos", principales, selection_mode="multi",
-            default=[c for c in AJUSTES["fijas"] if c in principales], key=clave_fijas,
-            on_change=_al_cambiar_fijas,
-            label_visibility="collapsed",
+        editables = [c for c in categorias_ordenadas(AJUSTES) if c != CATEGORIA_OTROS]
+        if st.session_state.get("ficha_cat") not in editables:
+            st.session_state["ficha_cat"] = None  # Ya no existe (borrada, unida o al subir una copia)
+        cat_ficha = st.selectbox(
+            "Editar una categoría", editables, index=None, key="ficha_cat", format_func=_fmt_cat,
+            placeholder="Editar una categoría…", label_visibility="collapsed",
         )
+        if cat_ficha:
+            _ficha_categoria(cat_ficha)
+        _mapa_categorias(cat_ficha)
 
-        # --- Reglas por palabra clave (se crean al clasificar en el Dashboard) ---
-        st.markdown("**Reglas por palabra clave**")
-        if not AJUSTES["reglas"]:
-            st.caption("Aún no hay reglas. Se crean al clasificar un comercio en el Dashboard.")
-        for regla in sorted(AJUSTES["reglas"], key=lambda r: r["palabra"]):
-            with st.container(horizontal=True, vertical_alignment="center"):
-                st.markdown(f"«{html.escape(regla['palabra'])}» → {html.escape(regla['categoria'])}")
-                st.button(
-                    "✕", key=f"regla_{regla['palabra']}", help=f"Borrar la regla «{regla['palabra']}»",
-                    on_click=borrar_regla, args=(AJUSTES, regla["palabra"]),
-                )
-
+    # --- Movimientos que no cuentan, comercios ignorados y devoluciones ---
+    with st.expander("Movimientos que no cuentan y devoluciones"):
         # --- Movimientos que no cuentan y comercios ignorados ---
         def _quitar(clave: str, valor: str):
             if valor in AJUSTES[clave]:

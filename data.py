@@ -191,6 +191,43 @@ def borrar_regla(ajustes: dict, palabra: str) -> None:
     ajustes["reglas"] = [r for r in ajustes["reglas"] if r["palabra"] != palabra]
 
 
+def comercios_fijados(ajustes: dict, palabra: str, categoria: str) -> list:
+    """Comercios clasificados a mano en 'categoria' cuyo texto contiene 'palabra'.
+
+    Son los que se fijaron al crear la regla desde un aviso: mandan sobre las reglas, así que
+    si se mueve la regla y no se mueven ellos, se quedarían en la categoría vieja.
+    """
+    buscada = f" {normalizar(palabra)} "
+    return [d for d, c in ajustes["clasificaciones"].items()
+            if c == categoria and buscada in f" {normalizar(d)} "]
+
+
+def editar_regla(ajustes: dict, vieja: str, palabra: str, categoria: str,
+                 mover_fijados: bool = True) -> str | None:
+    """Cambia la palabra y/o la categoría de la regla 'vieja'. Devuelve el motivo si no se puede.
+
+    Con mover_fijados, los comercios clasificados a mano con la palabra vieja en la categoría
+    vieja se mueven también a la nueva categoría.
+    """
+    palabra = normalizar(palabra)
+    regla = next((r for r in ajustes["reglas"] if r["palabra"] == vieja), None)
+    if regla is None:
+        return "Esa regla ya no existe."
+    if len(palabra) < MIN_LONG_PALABRA:
+        return f"La palabra clave debe tener al menos {MIN_LONG_PALABRA} letras."
+    if len(palabra) > MAX_LONG_PALABRA:
+        return f"La palabra clave puede tener como máximo {MAX_LONG_PALABRA} caracteres."
+    if categoria not in ajustes["categorias"]:
+        return "Esa categoría no existe."
+    if palabra != vieja and any(r["palabra"] == palabra for r in ajustes["reglas"]):
+        return f"Ya hay otra regla con «{palabra}»."
+    if mover_fijados and categoria != regla["categoria"]:
+        for desc in comercios_fijados(ajustes, vieja, regla["categoria"]):
+            ajustes["clasificaciones"][desc] = categoria
+    regla["palabra"], regla["categoria"] = palabra, categoria  # Se queda en su sitio de la lista
+    return None
+
+
 def anadir_exclusion_palabra(ajustes: dict, palabra: str) -> str | None:
     """Los movimientos que contengan 'palabra' (gastos e ingresos) dejan de contar."""
     palabra = normalizar(palabra)

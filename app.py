@@ -134,36 +134,125 @@ def _fila(izquierda: str, derecha: str, color_derecha: str = "inherit") -> str:
     )
 
 
-def _lista_movimientos(movs: pd.DataFrame, limite: int = 100, pista: str = "") -> None:
-    """Pinta una lista de movimientos en un único bloque HTML (más rápido en el móvil)."""
-    filas = []
-    for _, row in movs.head(limite).iterrows():
-        es_ingreso = row["tipo"] == "ingreso"
-        es_devolucion = bool(row.get("devolucion"))
-        color_monto = COLORS["balance_pos"] if es_ingreso or es_devolucion else COLORS["balance_neg"]
-        signo = "+" if es_ingreso or es_devolucion else "−"
-        etiquetas = ""
-        if es_devolucion:
-            etiquetas += '<span class="etiqueta" style="background:#EAF3DE;color:#3B6D11;">devolución</span>'
-        if row.get("excluido"):
-            etiquetas += '<span class="etiqueta" style="background:#EEEDE9;color:#6B6A66;">no cuenta</span>'
-        if row["recurrente"]:
-            etiquetas += '<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;">recurrente</span>'
+def _tabla_movimientos(movs: pd.DataFrame, clave: str):
+    """Tabla de movimientos en la que se puede tocar una fila; devuelve la fila elegida o None.
+
+    Es un único control aunque tenga cientos de filas (un botón por fila volvía lenta la app).
+    """
+    if movs.empty:
+        st.caption("No hay movimientos.")
+        return None
+    nota = pd.Series("", index=movs.index)
+    if "devolucion" in movs:
+        nota = nota.mask(movs["devolucion"].astype(bool), "devolución")
+    if "excluido" in movs:
+        nota = nota.mask(movs["excluido"].astype(bool), "no cuenta")
+    # Comercio e importe primero: en el móvil son las columnas que se ven sin deslizar
+    tabla = pd.DataFrame({
+        "Comercio": movs["descripcion"],
+        "Importe": movs["monto"],
+        "Fecha": movs["fecha"].map(fecha_corta),
+        "Categoría": movs["categoria"],
+        "Nota": nota,
+    }).reset_index(drop=True)
+    evento = st.dataframe(
+        tabla, hide_index=True, on_select="rerun", selection_mode="single-row",
+        key=f"{clave}_tabla_{st.session_state.get(f'{clave}_reinicio', 0)}",
+        column_config={
+            "Comercio": st.column_config.TextColumn(width="medium"),
+            "Importe": st.column_config.NumberColumn(format="%.2f €", width="small"),
+            "Fecha": st.column_config.TextColumn(width="small"),
+        },
+    )
+    filas = evento.selection.rows if evento else []
+    return movs.iloc[filas[0]] if filas else None
+
+
+def _panel_movimiento(mov: pd.Series, clave: str) -> None:
+    """Qué hacer con el comercio del movimiento tocado; se aplica a todos sus movimientos."""
+    desc = mov["descripcion"]
+    n = int((df_completo["descripcion"] == desc).sum())
+    es_ingreso = mov["tipo"] == "ingreso" or bool(mov.get("devolucion"))
+    cats = AJUSTES["categorias"]
+    hecho = False
+
+    with st.container(border=True):
+        st.markdown(f"<b>{html.escape(desc)}</b>", unsafe_allow_html=True)  # Texto del banco, escapado
+        st.caption("Lo que elijas se aplica a " + ("su movimiento." if n == 1 else f"sus {n} movimientos (mismo texto)."))
+
+        # Lo que ya tiene aplicado, y cómo deshacerlo
+        if desc in AJUSTES["excluir_descripciones"]:
+            st.info("No cuenta en los cálculos.")
+            if st.button("Volver a contar", key=f"{clave}_recontar"):
+                AJUSTES["excluir_descripciones"].remove(desc)
+                hecho = True
+        elif mov.get("excluido"):
+            st.info("No cuenta por una palabra clave: se cambia en Categorías → Editar categorías.")
+        if desc in AJUSTES["devoluciones"]:
+            st.info(f"Es una devolución de {AJUSTES['devoluciones'][desc]}.")
+            if st.button("Quitar devolución", key=f"{clave}_quitardev"):
+                del AJUSTES["devoluciones"][desc]
+                hecho = True
+        elif not es_ingreso and desc in AJUSTES["clasificaciones"]:
+            st.caption(f"Clasificado a mano en {AJUSTES['clasificaciones'][desc]}.")
+            if st.button("Quitar clasificación", key=f"{clave}_quitarclas",
+                         help="Vuelve a la clasificación automática y a tus reglas"):
+                del AJUSTES["clasificaciones"][desc]
+                hecho = True
+
         if es_ingreso:
-            etiquetas += '<span class="etiqueta" style="background:#EAF3DE;color:#3B6D11;">ingreso</span>'
+            actual = AJUSTES["devoluciones"].get(desc)
+            with st.container(horizontal=True, vertical_alignment="center"):
+                cat = st.selectbox("Devolución de", cats, index=cats.index(actual) if actual in cats else 0,
+                                   key=f"{clave}_cat_{desc}", label_visibility="collapsed")
+                if st.button("Es devolución", key=f"{clave}_dev"):
+                    AJUSTES["devoluciones"][desc] = cat
+                    hecho = True
+            with st.container(horizontal=True):
+                if st.button("Es un ingreso", key=f"{clave}_ing"):
+                    AJUSTES["devoluciones"].pop(desc, None)
+                    if desc not in AJUSTES["ingresos_revisados"]:
+                        AJUSTES["ingresos_revisados"].append(desc)
+                    hecho = True
+                if desc not in AJUSTES["excluir_descripciones"] and st.button("No contar", key=f"{clave}_exc"):
+                    AJUSTES["excluir_descripciones"].append(desc)
+                    hecho = True
+                if st.button("Cerrar", key=f"{clave}_cerrar"):
+                    hecho = True
+        else:
+            # Palabra clave sugerida (editable): la regla clasifica también los parecidos
+            palabra = st.text_input(
+                "Aplicar también a todos los que contengan:", value=sugerir_palabra_clave(desc),
+                key=f"{clave}_kw_{desc}", placeholder="Vacío: solo este comercio",
+            ).strip()
+            if palabra:
+                buscada = f" {normalizar(palabra)} "
+                por_desc = df_completo.loc[df_completo["tipo"] == "gasto", "descripcion"].value_counts()
+                n_kw = int(sum(c for d, c in por_desc.items() if buscada in f" {normalizar(d)} "))
+                st.caption(f"Afectaría a {n_kw} movimientos.")
+            with st.container(horizontal=True, vertical_alignment="center"):
+                actual = mov["categoria"]
+                cat = st.selectbox("Categoría", cats, index=cats.index(actual) if actual in cats else 0,
+                                   key=f"{clave}_cat_{desc}", label_visibility="collapsed")
+                guardar = st.button("Guardar", key=f"{clave}_guardar")
+            if guardar:
+                error = anadir_regla(AJUSTES, palabra, cat) if palabra else None
+                if error:
+                    st.error(error)
+                else:
+                    AJUSTES["clasificaciones"][desc] = cat  # Manda sobre reglas y clasificación automática
+                    hecho = True
+            with st.container(horizontal=True):
+                if desc not in AJUSTES["excluir_descripciones"] and st.button("No contar", key=f"{clave}_exc"):
+                    AJUSTES["excluir_descripciones"].append(desc)
+                    hecho = True
+                if st.button("Cerrar", key=f"{clave}_cerrar"):
+                    hecho = True
 
-        # La descripción viene del banco: se escapa para que no pueda inyectar HTML
-        izquierda = (
-            f'{html.escape(row["descripcion"])}{etiquetas}'
-            f'<div class="fila-sub">{fecha_corta(row["fecha"])}'
-            f' · {html.escape(str(row["categoria"]))}</div>'
-        )
-        filas.append(_fila(izquierda, f'{signo}{abs(row["monto"]):,.2f} €', color_monto))
-
-    if filas:
-        st.markdown("".join(filas), unsafe_allow_html=True)
-    if len(movs) > limite:
-        st.caption(f"Mostrando {limite} de {len(movs)} movimientos. {pista}".strip())
+    if hecho:
+        # Se deselecciona la fila: tras el cambio puede que ya no esté en la misma posición
+        st.session_state[f"{clave}_reinicio"] = st.session_state.get(f"{clave}_reinicio", 0) + 1
+        st.rerun()
 
 # --- Credenciales Enable Banking ---
 try:
@@ -570,7 +659,7 @@ with tab1:
                         detalle = f"{fila['total']:,.2f} € · {ultima}"
                     else:
                         detalle = f"{fila['n']} movimientos · {fila['total']:,.2f} € en total · último el {ultima}"
-                    st.markdown(f"**{desc}**")
+                    st.markdown(f"<b>{html.escape(desc)}</b>", unsafe_allow_html=True)  # Texto del banco, escapado
                     st.caption(detalle)
 
                     # Palabra clave sugerida (editable): la regla clasifica también los parecidos
@@ -643,7 +732,7 @@ with tab1:
                         detalle = f"+{fila['total']:,.2f} € · {ultima}"
                     else:
                         detalle = f"{fila['n']} movimientos · +{fila['total']:,.2f} € en total · último el {ultima}"
-                    st.markdown(f"**{desc}**")
+                    st.markdown(f"<b>{html.escape(desc)}</b>", unsafe_allow_html=True)  # Texto del banco, escapado
                     st.caption(detalle)
                     with st.container(horizontal=True, vertical_alignment="center"):
                         cat_dev = st.selectbox(
@@ -815,7 +904,10 @@ with tab2:
                 if st.button("Quitar selección", key="hist_quitar"):
                     st.session_state["hist_reinicio"] = st.session_state.get("hist_reinicio", 0) + 1
                     st.rerun()
-            _lista_movimientos(movs_sel)
+            # Tocar un movimiento abre su panel (clave propia: no quita la selección de la barra)
+            mov_hist = _tabla_movimientos(movs_sel, "histmov")
+            if mov_hist is not None:
+                _panel_movimiento(mov_hist, "histmov")
         else:
             st.caption("Toca una barra para ver sus movimientos.")
 
@@ -1065,7 +1157,10 @@ with tab4:
 
     st.caption(f"{len(df_t)} transacciones")
 
-    _lista_movimientos(df_t, pista="Usa los filtros para acotar.")
+    st.caption("Toca un movimiento para clasificarlo, marcarlo como devolución o no contarlo.")
+    mov_tx = _tabla_movimientos(df_t, "tx")
+    if mov_tx is not None:
+        _panel_movimiento(mov_tx, "tx")
 
 
 # ═══════════════════════════════════════════════

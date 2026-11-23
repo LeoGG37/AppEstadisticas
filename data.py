@@ -100,7 +100,8 @@ INCOME_KEYWORDS = ["nomina", "nómina", "transferencia recibida", "bizum recibid
 #              "excluir_descripciones": [descripción, ...], # no cuentan en ningún cálculo
 #              "excluir_palabras": ["traspaso", ...],       # ídem, por palabra clave
 #              "devoluciones": {descripción: categoría},    # ingresos que restan de un gasto
-#              "ingresos_revisados": [descripción, ...]}    # ingresos que no se vuelven a preguntar
+#              "ingresos_revisados": [descripción, ...],    # ingresos que no se vuelven a preguntar
+#              "padres": {subcategoría: categoría}}         # p. ej. {"Warhammer": "Ocio"}
 
 CATEGORIA_OTROS = "Otros"      # Destino de lo no clasificado: no se puede renombrar ni borrar
 # Gasto fijo = lo que se paga sí o sí cada mes, aunque el importe cambie (p. ej. el supermercado)
@@ -133,6 +134,7 @@ def ajustes_por_defecto() -> dict:
         "excluir_palabras": [],
         "devoluciones": {},
         "ingresos_revisados": [],
+        "padres": {},
     }
 
 
@@ -291,6 +293,12 @@ def renombrar_categoria(ajustes: dict, viejo: str, nuevo: str) -> str | None:
     for desc, cat in ajustes["devoluciones"].items():                             # y devoluciones
         if cat == viejo:
             ajustes["devoluciones"][desc] = nuevo
+    padres = ajustes.setdefault("padres", {})                                     # y subcategorías
+    if viejo in padres:
+        padres[nuevo] = padres.pop(viejo)
+    for sub, padre in padres.items():
+        if padre == viejo:
+            padres[sub] = nuevo
     _redirigir(ajustes, viejo, nuevo)
     return None
 
@@ -298,6 +306,18 @@ def renombrar_categoria(ajustes: dict, viejo: str, nuevo: str) -> str | None:
 def borrar_categoria(ajustes: dict, nombre: str) -> str | None:
     if nombre == CATEGORIA_OTROS:
         return f"«{CATEGORIA_OTROS}» no se puede borrar: es donde van los comercios sin clasificar."
+    padres = ajustes.setdefault("padres", {})
+    if nombre in padres:
+        # Una subcategoría no se pierde: todo lo suyo pasa a su categoría padre
+        return unir_categorias(ajustes, nombre, padres[nombre])
+    for sub in [s for s, p in padres.items() if p == nombre]:
+        # Sus subcategorías pasan a ser principales, en el mismo grupo (fijo/variable) que tenían
+        del padres[sub]
+        if (nombre in ajustes["fijas"]) != (sub in ajustes["fijas"]):
+            if nombre in ajustes["fijas"]:
+                ajustes["fijas"].append(sub)
+            else:
+                ajustes["fijas"].remove(sub)
     ajustes["categorias"].remove(nombre)
     ajustes["colores"].pop(nombre, None)
     ajustes["fijas"] = [c for c in ajustes["fijas"] if c != nombre]
@@ -306,6 +326,58 @@ def borrar_categoria(ajustes: dict, nombre: str) -> str | None:
     ajustes["devoluciones"] = {d: c for d, c in ajustes["devoluciones"].items() if c != nombre}
     _redirigir(ajustes, nombre, CATEGORIA_OTROS)  # Sus movimientos pasan a "Otros"
     return None
+
+
+# ═══════════════════════════════════════════════
+# SUBCATEGORÍAS (dos niveles: categoría › subcategoría)
+# ═══════════════════════════════════════════════
+
+def principal(ajustes: dict, categoria: str) -> str:
+    """La categoría principal: el padre si es una subcategoría, o ella misma."""
+    return ajustes.get("padres", {}).get(categoria, categoria)
+
+
+def etiqueta_categoria(ajustes: dict, categoria: str) -> str:
+    """'Ocio › Warhammer' para una subcategoría; el nombre tal cual para una principal."""
+    padre = ajustes.get("padres", {}).get(categoria)
+    return f"{padre} › {categoria}" if padre else categoria
+
+
+def subcategorias(ajustes: dict, categoria: str) -> list:
+    padres = ajustes.get("padres", {})
+    return [c for c in ajustes["categorias"] if padres.get(c) == categoria]
+
+
+def categorias_ordenadas(ajustes: dict) -> list:
+    """Cada categoría principal seguida de sus subcategorías (para los desplegables)."""
+    padres = ajustes.get("padres", {})
+    ordenadas = []
+    for cat in ajustes["categorias"]:
+        if cat not in padres:
+            ordenadas += [cat] + subcategorias(ajustes, cat)
+    return ordenadas + [c for c in ajustes["categorias"] if c not in ordenadas]
+
+
+def poner_dentro(ajustes: dict, sub: str, padre: str) -> str | None:
+    """Convierte 'sub' en subcategoría de 'padre'. Devuelve el motivo si no se puede."""
+    padres = ajustes.setdefault("padres", {})
+    if sub not in ajustes["categorias"] or padre not in ajustes["categorias"]:
+        return "Alguna de las categorías no existe."
+    if sub == padre:
+        return "Elige dos categorías distintas."
+    if CATEGORIA_OTROS in (sub, padre):
+        return f"«{CATEGORIA_OTROS}» no puede tener subcategorías ni ser una."
+    if padre in padres:
+        return f"«{padre}» ya es una subcategoría: solo hay dos niveles."
+    if subcategorias(ajustes, sub):
+        return f"«{sub}» tiene subcategorías: solo hay dos niveles."
+    padres[sub] = padre
+    return None
+
+
+def sacar_de_padre(ajustes: dict, sub: str) -> None:
+    """La subcategoría vuelve a ser una categoría principal."""
+    ajustes.setdefault("padres", {}).pop(sub, None)
 
 
 def unir_categorias(ajustes: dict, origen: str, destino: str) -> str | None:
@@ -323,6 +395,15 @@ def unir_categorias(ajustes: dict, origen: str, destino: str) -> str | None:
     for desc, cat in ajustes["devoluciones"].items():
         if cat == origen:
             ajustes["devoluciones"][desc] = destino
+    padres = ajustes.setdefault("padres", {})
+    if padres.get(destino) == origen:
+        del padres[destino]  # El destino era subcategoría del origen: pasa a ser principal
+    for sub in [s for s, p in padres.items() if p == origen]:
+        if destino in padres:
+            del padres[sub]  # Solo hay dos niveles: no pueden colgar de una subcategoría
+        else:
+            padres[sub] = destino
+    padres.pop(origen, None)
     _redirigir(ajustes, origen, destino)  # Clasificaciones a mano y clasificación automática
     ajustes["categorias"].remove(origen)
     ajustes["colores"].pop(origen, None)
@@ -443,6 +524,15 @@ def validar_ajustes(datos) -> dict:
         raise ValueError("Las devoluciones guardadas no son válidas.")
     ingresos_revisados = _lista_textos("ingresos_revisados", MAX_CLASIFICACIONES, _descripcion_valida)
 
+    # Subcategorías (las copias anteriores no las traen): dos niveles como máximo
+    padres = datos.get("padres", {})
+    if not isinstance(padres, dict) or not all(
+        isinstance(s, str) and isinstance(p, str) and s in categorias and p in categorias
+        and s != p and CATEGORIA_OTROS not in (s, p) and p not in padres
+        for s, p in padres.items()
+    ):
+        raise ValueError("Las subcategorías guardadas no son válidas.")
+
     resultado = {
         "categorias": list(categorias),
         "colores": {c: colores[c] for c in categorias if c in colores},
@@ -455,6 +545,7 @@ def validar_ajustes(datos) -> dict:
         "excluir_palabras": list(dict.fromkeys(excluir_palabras)),
         "devoluciones": dict(devoluciones_guardadas),
         "ingresos_revisados": ingresos_revisados,
+        "padres": dict(padres),
     }
     for c in categorias:
         if c not in resultado["colores"]:

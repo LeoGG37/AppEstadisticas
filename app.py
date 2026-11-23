@@ -30,6 +30,12 @@ from data import (  # noqa: E402
     renombrar_categoria,
     borrar_categoria,
     unir_categorias,
+    principal,
+    etiqueta_categoria,
+    subcategorias,
+    categorias_ordenadas,
+    poner_dentro,
+    sacar_de_padre,
     aplicar_ajustes,
     sugerir_palabra_clave,
     normalizar,
@@ -153,7 +159,7 @@ def _tabla_movimientos(movs: pd.DataFrame, clave: str):
         "Comercio": movs["descripcion"],
         "Importe": movs["monto"],
         "Fecha": movs["fecha"].map(fecha_corta),
-        "Categoría": movs["categoria"],
+        "Categoría": movs["categoria"].map(lambda c: etiqueta_categoria(AJUSTES, c)),
         "Nota": nota,
     }).reset_index(drop=True)
     evento = st.dataframe(
@@ -174,7 +180,7 @@ def _panel_movimiento(mov: pd.Series, clave: str) -> None:
     desc = mov["descripcion"]
     n = int((df_completo["descripcion"] == desc).sum())
     es_ingreso = mov["tipo"] == "ingreso" or bool(mov.get("devolucion"))
-    cats = AJUSTES["categorias"]
+    cats = categorias_ordenadas(AJUSTES)  # Cada subcategoría justo debajo de su categoría
     hecho = False
 
     with st.container(border=True):
@@ -205,7 +211,7 @@ def _panel_movimiento(mov: pd.Series, clave: str) -> None:
             actual = AJUSTES["devoluciones"].get(desc)
             with st.container(horizontal=True, vertical_alignment="center"):
                 cat = st.selectbox("Devolución de", cats, index=cats.index(actual) if actual in cats else 0,
-                                   key=f"{clave}_cat_{desc}", label_visibility="collapsed")
+                                   key=f"{clave}_cat_{desc}", label_visibility="collapsed", format_func=_fmt_cat)
                 if st.button("Es devolución", key=f"{clave}_dev"):
                     AJUSTES["devoluciones"][desc] = cat
                     hecho = True
@@ -234,7 +240,7 @@ def _panel_movimiento(mov: pd.Series, clave: str) -> None:
             with st.container(horizontal=True, vertical_alignment="center"):
                 actual = mov["categoria"]
                 cat = st.selectbox("Categoría", cats, index=cats.index(actual) if actual in cats else 0,
-                                   key=f"{clave}_cat_{desc}", label_visibility="collapsed")
+                                   key=f"{clave}_cat_{desc}", label_visibility="collapsed", format_func=_fmt_cat)
                 guardar = st.button("Guardar", key=f"{clave}_guardar")
             if guardar:
                 error = anadir_regla(AJUSTES, palabra, cat) if palabra else None
@@ -489,6 +495,12 @@ AJUSTES.setdefault("reglas", [])  # Ídem para las reglas por palabra clave
 for _clave in ("ignorados", "excluir_descripciones", "excluir_palabras", "ingresos_revisados"):  # Ídem
     AJUSTES.setdefault(_clave, [])
 AJUSTES.setdefault("devoluciones", {})
+AJUSTES.setdefault("padres", {})  # Ídem para las subcategorías
+
+
+def _fmt_cat(categoria: str) -> str:
+    """Nombre para los desplegables: 'Ocio › Warhammer' si es una subcategoría."""
+    return etiqueta_categoria(AJUSTES, categoria)
 
 # --- Título ---
 st.title("Mis Gastos")
@@ -679,9 +691,10 @@ with tab1:
                     with st.container(horizontal=True, vertical_alignment="center"):
                         cat_elegida = st.selectbox(
                             "Categoría",
-                            AJUSTES["categorias"],
+                            categorias_ordenadas(AJUSTES),
                             key=f"sc_{desc}",
                             label_visibility="collapsed",
+                            format_func=_fmt_cat,
                         )
                         guardar = st.button("Guardar", key=f"btn_{desc}")
                     if guardar:
@@ -737,8 +750,8 @@ with tab1:
                     st.caption(detalle)
                     with st.container(horizontal=True, vertical_alignment="center"):
                         cat_dev = st.selectbox(
-                            "Devolución de", AJUSTES["categorias"], key=f"dev_{desc}",
-                            label_visibility="collapsed",
+                            "Devolución de", categorias_ordenadas(AJUSTES), key=f"dev_{desc}",
+                            label_visibility="collapsed", format_func=_fmt_cat,
                         )
                         if st.button("Es devolución", key=f"devbtn_{desc}"):
                             AJUSTES["devoluciones"][desc] = cat_dev
@@ -777,7 +790,8 @@ with tab1:
 
         # Gastos fijos (categorías marcadas en Categorías → Editar categorías) y variables
         gastos_mes = df_mes[df_mes["tipo"] == "gasto"]
-        fijos = max(0.0, -gastos_mes[gastos_mes["categoria"].isin(AJUSTES["fijas"])]["monto"].sum())
+        es_fijo = gastos_mes["categoria"].map(lambda c: principal(AJUSTES, c)).isin(AJUSTES["fijas"])
+        fijos = max(0.0, -gastos_mes[es_fijo]["monto"].sum())  # La subcategoría hereda el grupo
         variables = max(0.0, gastos - fijos)
         pct_fijos = round(fijos / gastos * 100) if gastos > 0 else 0
         _metricas([
@@ -935,14 +949,17 @@ with tab3:
         df_c = df_p[df_p["tipo"] == "gasto"]
         por_cat = (-df_c.groupby("categoria")["monto"].sum()).clip(lower=0)  # Resta devoluciones
         por_cat = por_cat[por_cat > 0].sort_values(ascending=False)
+        # Totales por categoría principal (cada subcategoría suma en su padre)
+        por_principal = por_cat.groupby(lambda c: principal(AJUSTES, c)).sum().sort_values(ascending=False)
 
         col_chart, col_list = st.columns([1, 1])
 
         with col_chart:
-            colores_donut = [AJUSTES["colores"].get(c, COLORS["neutral"]) for c in por_cat.index]
+            # El rosco solo muestra categorías principales; el detalle va en el desglose
+            colores_donut = [AJUSTES["colores"].get(c, COLORS["neutral"]) for c in por_principal.index]
             fig2 = go.Figure(go.Pie(
-                labels=por_cat.index,
-                values=por_cat.values,
+                labels=por_principal.index,
+                values=por_principal.values,
                 hole=0.6,
                 marker_colors=colores_donut,
                 textinfo="percent",
@@ -957,11 +974,11 @@ with tab3:
             st.plotly_chart(fig2, width="stretch", config=PLOTLY_CONFIG)
 
         with col_list:
-            total_mes = por_cat.sum()
-            # Todas las categorías caen en uno de los dos grupos: las marcadas son fijas, el resto variables
+            total_mes = por_principal.sum()
+            # Todas las categorías caen en uno de los dos grupos (las subcategorías, en el de su padre)
             grupos = [
-                ("Fijos", por_cat[por_cat.index.isin(AJUSTES["fijas"])]),
-                ("Variables", por_cat[~por_cat.index.isin(AJUSTES["fijas"])]),
+                ("Fijos", por_principal[por_principal.index.isin(AJUSTES["fijas"])]),
+                ("Variables", por_principal[~por_principal.index.isin(AJUSTES["fijas"])]),
             ]
             for nombre_grupo, cats_grupo in grupos:
                 subtotal = cats_grupo.sum()
@@ -987,6 +1004,24 @@ with tab3:
                         f'<div style="background:{color};height:4px;border-radius:4px;width:{pct}%;"></div>'
                         f'</div></div>'
                     )
+                    # Subcategorías con gasto, y lo que queda directamente en la categoría
+                    subs = [(s, por_cat[s]) for s in subcategorias(AJUSTES, cat) if s in por_cat.index]
+                    if subs:
+                        propio = por_cat.get(cat, 0.0)
+                        filas_sub = sorted(subs, key=lambda x: -x[1]) + ([(None, propio)] if propio > 0 else [])
+                        for sub, imp_sub in filas_sub:
+                            pct_sub = round(imp_sub / total_mes * 100) if total_mes > 0 else 0
+                            nombre_sub = html.escape(sub) if sub else 'Sin subcategoría'
+                            gris = '#898781' if sub else '#b4b2a9'
+                            html_grupo += (
+                                f'<div style="margin-left:18px;padding-left:10px;border-left:1px solid #e3e2de;">'
+                                f'<div style="display:flex;justify-content:space-between;margin-bottom:2px;">'
+                                f'<span style="font-size:12px;color:{gris};">› {nombre_sub}</span>'
+                                f'<span style="font-size:12px;color:{gris};">{imp_sub:,.2f} €</span></div>'
+                                f'<div style="background:#f0efec;border-radius:4px;height:3px;margin-bottom:8px;">'
+                                f'<div style="background:{color};opacity:0.55;height:3px;border-radius:4px;width:{pct_sub}%;"></div>'
+                                f'</div></div>'
+                            )
                 st.markdown(html_grupo, unsafe_allow_html=True)
 
         st.divider()
@@ -1048,26 +1083,58 @@ with tab3:
         if len(origenes) >= 1 and len(AJUSTES["categorias"]) >= 2:
             # Empiezan vacíos: así un toque accidental no puede borrar ninguna categoría
             with st.container(horizontal=True, vertical_alignment="center"):
-                origen = st.selectbox("Unir", origenes, index=None, placeholder="Elige", key="unir_origen")
-                destino = st.selectbox("con", [c for c in AJUSTES["categorias"] if c != origen],
-                                       index=None, placeholder="Elige", key="unir_destino")
+                origen = st.selectbox("Unir", [c for c in categorias_ordenadas(AJUSTES) if c in origenes],
+                                      index=None, placeholder="Elige", key="unir_origen", format_func=_fmt_cat)
+                destino = st.selectbox("con", [c for c in categorias_ordenadas(AJUSTES) if c != origen],
+                                       index=None, placeholder="Elige", key="unir_destino", format_func=_fmt_cat)
             if origen and destino:
                 st.button(f"Unir «{origen}» con «{destino}»", key="unir_boton",
                           on_click=_al_unir, args=(origen, destino))
+
+        # --- Subcategorías: poner una categoría dentro de otra (dos niveles) ---
+        def _al_poner_dentro(sub: str, padre: str):
+            st.session_state["error_cat"] = poner_dentro(AJUSTES, sub, padre)
+
+        st.markdown("**Subcategorías**")
+        st.caption("Pon una categoría dentro de otra para ver el detalle (por ejemplo, Warhammer "
+                   "dentro de Ocio). Hereda si es fija o variable.")
+        padres_actuales = AJUSTES["padres"]
+        # Puede ser subcategoría la que no lo es ya ni tiene subcategorías; padre, la que no es subcategoría
+        candidatas_sub = [c for c in AJUSTES["categorias"] if c != CATEGORIA_OTROS
+                          and c not in padres_actuales and not subcategorias(AJUSTES, c)]
+        with st.container(horizontal=True, vertical_alignment="center"):
+            sub_elegida = st.selectbox("Poner", candidatas_sub, index=None, placeholder="Elige", key="sub_hija")
+            padre_elegido = st.selectbox(
+                "dentro de", [c for c in AJUSTES["categorias"] if c not in (CATEGORIA_OTROS, sub_elegida)
+                              and c not in padres_actuales],
+                index=None, placeholder="Elige", key="sub_padre",
+            )
+        if sub_elegida and padre_elegido:
+            st.button(f"Poner «{sub_elegida}» dentro de «{padre_elegido}»", key="sub_boton",
+                      on_click=_al_poner_dentro, args=(sub_elegida, padre_elegido))
+        for sub in [c for c in categorias_ordenadas(AJUSTES) if c in padres_actuales]:
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.markdown(html.escape(etiqueta_categoria(AJUSTES, sub)))
+                st.button("✕", key=f"sacar_{sub}", help=f"Sacar «{sub}» y que vuelva a ser categoría principal",
+                          on_click=sacar_de_padre, args=(AJUSTES, sub))
 
         # --- Gastos fijos: botones que se marcan y desmarcan tocándolos ---
         st.markdown("**¿Qué categorías son gastos fijos?**")
         st.caption("Lo que pagas sí o sí cada mes, aunque el importe cambie. El resto cuenta como variable.")
         # La clave cambia con las categorías y las fijas: así el widget nunca muestra un estado viejo
-        clave_fijas = f"fijas_{hash((tuple(AJUSTES['categorias']), tuple(AJUSTES['fijas'])))}"
+        principales = [c for c in AJUSTES["categorias"] if c not in AJUSTES["padres"]]
+        clave_fijas = f"fijas_{hash((tuple(principales), tuple(AJUSTES['fijas'])))}"
 
         def _al_cambiar_fijas():
             marcadas = st.session_state[clave_fijas] or []
-            AJUSTES["fijas"] = [c for c in AJUSTES["categorias"] if c in marcadas]
+            # Se conserva la marca propia de las subcategorías por si vuelven a ser principales
+            AJUSTES["fijas"] = ([c for c in principales if c in marcadas]
+                                + [c for c in AJUSTES["fijas"] if c in AJUSTES["padres"]])
 
         st.pills(
-            "Gastos fijos", AJUSTES["categorias"], selection_mode="multi",
-            default=AJUSTES["fijas"], key=clave_fijas, on_change=_al_cambiar_fijas,
+            "Gastos fijos", principales, selection_mode="multi",
+            default=[c for c in AJUSTES["fijas"] if c in principales], key=clave_fijas,
+            on_change=_al_cambiar_fijas,
             label_visibility="collapsed",
         )
 
@@ -1158,17 +1225,25 @@ with tab3:
 # ═══════════════════════════════════════════════
 with tab4:
     busqueda = st.text_input("Buscar", placeholder="Nombre del comercio...", label_visibility="collapsed")
-    cats_disponibles = ["Todas"] + sorted(df["categoria"].dropna().unique().tolist())
+    presentes = set(df["categoria"].dropna())
+    # Una categoría aparece si tiene movimientos ella o alguna de sus subcategorías
+    cats_disponibles = ["Todas"] + [
+        c for c in categorias_ordenadas(AJUSTES)
+        if c in presentes or any(s in presentes for s in subcategorias(AJUSTES, c))
+    ] + sorted(presentes - set(AJUSTES["categorias"]))  # p. ej. "Ingreso"
     # Los dos filtros comparten fila, también en el móvil
     with st.container(horizontal=True):
-        cat_filtro = st.selectbox("Categoría", cats_disponibles, label_visibility="collapsed")
+        cat_filtro = st.selectbox(
+            "Categoría", cats_disponibles, label_visibility="collapsed",
+            format_func=lambda c: f"{c} (con subcategorías)" if subcategorias(AJUSTES, c) else _fmt_cat(c),
+        )
         tipo_filtro = st.selectbox("Tipo", ["Todos", "Gasto", "Ingreso"], label_visibility="collapsed")
 
     df_t = df_p_completo.copy()  # Movimientos del periodo elegido, también los que no cuentan
     if busqueda:
         df_t = df_t[df_t["descripcion"].str.contains(busqueda, case=False, na=False)]
     if cat_filtro != "Todas":
-        df_t = df_t[df_t["categoria"] == cat_filtro]
+        df_t = df_t[df_t["categoria"].isin([cat_filtro] + subcategorias(AJUSTES, cat_filtro))]
     if tipo_filtro == "Gasto":
         df_t = df_t[df_t["tipo"] == "gasto"]
     elif tipo_filtro == "Ingreso":

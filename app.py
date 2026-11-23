@@ -29,6 +29,7 @@ from data import (  # noqa: E402
     anadir_categoria,
     renombrar_categoria,
     borrar_categoria,
+    unir_categorias,
     aplicar_ajustes,
     sugerir_palabra_clave,
     normalizar,
@@ -1035,6 +1036,24 @@ with tab3:
                     "✕", key=f"del_{cat}", help=f"Eliminar {cat}",
                     on_click=_al_borrar, args=(cat,), disabled=bloqueada,
                 )
+
+        # --- Unir dos categorías: todo lo del origen pasa al destino y el origen se borra ---
+        def _al_unir(origen: str, destino: str):
+            st.session_state["error_cat"] = unir_categorias(AJUSTES, origen, destino)
+
+        st.markdown("**Unir categorías**")
+        st.caption("Todo lo de la primera (clasificaciones, reglas y devoluciones) pasa a la segunda, "
+                   "y la primera se borra.")
+        origenes = [c for c in AJUSTES["categorias"] if c != CATEGORIA_OTROS]
+        if len(origenes) >= 1 and len(AJUSTES["categorias"]) >= 2:
+            # Empiezan vacíos: así un toque accidental no puede borrar ninguna categoría
+            with st.container(horizontal=True, vertical_alignment="center"):
+                origen = st.selectbox("Unir", origenes, index=None, placeholder="Elige", key="unir_origen")
+                destino = st.selectbox("con", [c for c in AJUSTES["categorias"] if c != origen],
+                                       index=None, placeholder="Elige", key="unir_destino")
+            if origen and destino:
+                st.button(f"Unir «{origen}» con «{destino}»", key="unir_boton",
+                          on_click=_al_unir, args=(origen, destino))
 
         # --- Gastos fijos: botones que se marcan y desmarcan tocándolos ---
         st.markdown("**¿Qué categorías son gastos fijos?**")

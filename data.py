@@ -308,6 +308,28 @@ def borrar_categoria(ajustes: dict, nombre: str) -> str | None:
     return None
 
 
+def unir_categorias(ajustes: dict, origen: str, destino: str) -> str | None:
+    """Pasa todo lo de 'origen' a 'destino' (clasificaciones, reglas, devoluciones y lo que la
+    app clasifica sola) y después borra 'origen'. Devuelve el motivo si no se puede."""
+    if origen == CATEGORIA_OTROS:
+        return f"«{CATEGORIA_OTROS}» no se puede unir con otra: es donde van los comercios sin clasificar."
+    if origen == destino:
+        return "Elige dos categorías distintas."
+    if origen not in ajustes["categorias"] or destino not in ajustes["categorias"]:
+        return "Alguna de las categorías no existe."
+    for regla in ajustes["reglas"]:
+        if regla["categoria"] == origen:
+            regla["categoria"] = destino
+    for desc, cat in ajustes["devoluciones"].items():
+        if cat == origen:
+            ajustes["devoluciones"][desc] = destino
+    _redirigir(ajustes, origen, destino)  # Clasificaciones a mano y clasificación automática
+    ajustes["categorias"].remove(origen)
+    ajustes["colores"].pop(origen, None)
+    ajustes["fijas"] = [c for c in ajustes["fijas"] if c != origen]  # 'destino' conserva su grupo
+    return None
+
+
 def aplicar_ajustes(df: pd.DataFrame, ajustes: dict) -> pd.DataFrame:
     """Aplica a los gastos, por este orden: cambios de nombre, reglas por palabra clave y
     clasificaciones manuales de un comercio concreto (la más concreta manda)."""

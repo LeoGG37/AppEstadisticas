@@ -4,12 +4,8 @@ import time
 from datetime import datetime, timedelta, timezone
 import requests
 
-try:
-    import jwt
-    from cryptography.hazmat.primitives.serialization import load_pem_private_key
-    _DEPS_OK = True
-except ImportError:
-    _DEPS_OK = False
+import jwt
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 API_URL = "https://api.enablebanking.com"
 
@@ -29,19 +25,6 @@ def _make_jwt(application_id: str, private_key_pem: str) -> str:
         algorithm="RS256",
         headers={"typ": "JWT", "alg": "RS256", "kid": application_id},
     )
-
-
-def list_aspsps(application_id: str, private_key_pem: str, country: str = "ES") -> list:
-    """Devuelve la lista de bancos disponibles en un país."""
-    token = _make_jwt(application_id, private_key_pem)
-    resp = requests.get(
-        f"{API_URL}/aspsps",
-        headers={"Authorization": f"Bearer {token}"},
-        params={"country": country},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    return resp.json().get("aspsps", [])
 
 
 def start_auth(

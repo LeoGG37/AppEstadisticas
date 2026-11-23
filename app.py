@@ -162,9 +162,13 @@ def _tabla_movimientos(movs: pd.DataFrame, clave: str):
         "Categoría": movs["categoria"].map(lambda c: etiqueta_categoria(AJUSTES, c)),
         "Nota": nota,
     }).reset_index(drop=True)
+    # Streamlit recuerda la fila tocada por su posición, no por el movimiento. Si la lista cambia
+    # (búsqueda, filtro, periodo u otra barra), la clave cambia y la selección se borra; si no,
+    # podría abrirse otro movimiento distinto del que se tocó.
+    huella = int(pd.util.hash_pandas_object(movs.index, index=False).sum()) % 1_000_000_007
     evento = st.dataframe(
         tabla, hide_index=True, on_select="rerun", selection_mode="single-row",
-        key=f"{clave}_tabla_{st.session_state.get(f'{clave}_reinicio', 0)}",
+        key=f"{clave}_tabla_{st.session_state.get(f'{clave}_reinicio', 0)}_{huella}",
         column_config={
             "Comercio": st.column_config.TextColumn(width="medium"),
             "Importe": st.column_config.NumberColumn(format="%.2f €", width="small"),
@@ -172,7 +176,8 @@ def _tabla_movimientos(movs: pd.DataFrame, clave: str):
         },
     )
     filas = evento.selection.rows if evento else []
-    return movs.iloc[filas[0]] if filas else None
+    # Por si acaso: una posición que ya no existe en la lista se ignora en vez de dar error
+    return movs.iloc[filas[0]] if filas and 0 <= filas[0] < len(movs) else None
 
 
 def _panel_movimiento(mov: pd.Series, clave: str) -> None:
@@ -283,11 +288,19 @@ except Exception:
     _eb_account_uids = []
 
 
+ESPERA_NOMBRES_CUENTAS = 600  # Segundos sin reintentar leer los nombres de las cuentas tras un fallo
+
+
 def _get_account_list() -> list:
     """Devuelve [{uid, label}] para las cuentas de la sesión activa."""
     if "account_list" in st.session_state:
         return st.session_state["account_list"]
     if not all([_eb_app_id, _eb_key, _eb_session]):
+        return []
+    # Si falló hace poco no se repite en cada toque (hacía lenta la app); mientras tanto se usan
+    # las cuentas de los Secrets con nombres genéricos
+    fallo = st.session_state.get("account_list_fallo")
+    if fallo and time.time() - fallo < ESPERA_NOMBRES_CUENTAS:
         return []
     try:
         import enable_banking as eb
@@ -315,11 +328,12 @@ def _get_account_list() -> list:
         st.session_state["account_list"] = result
         return result
     except Exception:
+        st.session_state["account_list_fallo"] = time.time()
         return []
 
 
 def _empty_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"])
+    return pd.DataFrame(columns=["fecha", "monto", "descripcion", "categoria", "tipo", "mes"])
 
 
 # El banco (PSD2) solo permite unas pocas consultas de movimientos al día por cuenta
@@ -801,47 +815,23 @@ with tab1:
 
         st.divider()
 
-        col_rec, col_top = st.columns(2)
-
-        # --- Recurrentes ---
-        with col_rec:
-            st.markdown("**Gastos recurrentes**")
-            recurrentes = df_mes[
-                df_mes["recurrente"] & (df_mes["tipo"] == "gasto")
-            ][["descripcion", "monto"]].copy()
-            recurrentes["monto"] = recurrentes["monto"].abs()
-
-            if recurrentes.empty:
-                st.caption("Sin recurrentes en este periodo.")
-            else:
-                filas = "".join(
-                    _fila(
-                        f'<span class="etiqueta" style="background:#E6F1FB;color:#185FA5;'
-                        f'margin:0 6px 0 0;">mensual</span>{html.escape(row["descripcion"])}',
-                        f'{row["monto"]:,.2f} €',
-                    )
-                    for _, row in recurrentes.iterrows()
-                )
-                st.markdown(filas, unsafe_allow_html=True)
-
         # --- Top 5 comercios ---
-        with col_top:
-            st.markdown("**Top 5 comercios**")
-            top5 = (
-                df_mes[(df_mes["tipo"] == "gasto") & (df_mes["monto"] < 0)]
-                .groupby("descripcion")["monto"]
-                .sum()
-                .abs()
-                .nlargest(5)
+        st.markdown("**Top 5 comercios**")
+        top5 = (
+            df_mes[(df_mes["tipo"] == "gasto") & (df_mes["monto"] < 0)]
+            .groupby("descripcion")["monto"]
+            .sum()
+            .abs()
+            .nlargest(5)
+        )
+        if top5.empty:
+            st.caption("Sin datos.")
+        else:
+            filas = "".join(
+                _fila(f"{i}. {html.escape(nombre)}", f"{importe:,.2f} €", COLORS["income"])
+                for i, (nombre, importe) in enumerate(top5.items(), 1)
             )
-            if top5.empty:
-                st.caption("Sin datos.")
-            else:
-                filas = "".join(
-                    _fila(f"{i}. {html.escape(nombre)}", f"{importe:,.2f} €", COLORS["income"])
-                    for i, (nombre, importe) in enumerate(top5.items(), 1)
-                )
-                st.markdown(filas, unsafe_allow_html=True)
+            st.markdown(filas, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════
@@ -1241,7 +1231,8 @@ with tab4:
 
     df_t = df_p_completo.copy()  # Movimientos del periodo elegido, también los que no cuentan
     if busqueda:
-        df_t = df_t[df_t["descripcion"].str.contains(busqueda, case=False, na=False)]
+        # regex=False: se busca el texto tal cual ("(", "+" o "*" rompían la búsqueda)
+        df_t = df_t[df_t["descripcion"].str.contains(busqueda, case=False, na=False, regex=False)]
     if cat_filtro != "Todas":
         df_t = df_t[df_t["categoria"].isin([cat_filtro] + subcategorias(AJUSTES, cat_filtro))]
     if tipo_filtro == "Gasto":
@@ -1302,6 +1293,7 @@ with tab5:
                         st.session_state.pop("oauth_state", None)
                         st.session_state.pop("auth_url", None)
                         st.session_state.pop("account_list", None)
+                        st.session_state.pop("account_list_fallo", None)
                         st.rerun()
                     else:
                         st.error("No se encontraron cuentas en la sesión.")
@@ -1501,6 +1493,7 @@ with tab5:
             # Se salta la espera de 6 h tras un fallo; los datos buenos se conservan si vuelve a fallar
             st.session_state["forzar_recarga"] = True
             st.session_state.pop("account_list", None)
+            st.session_state.pop("account_list_fallo", None)  # Reintentar también los nombres
             st.rerun()
 
         if btn_test:

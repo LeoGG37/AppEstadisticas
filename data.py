@@ -11,7 +11,6 @@ COLORS = {
     "expense":     "#eb6834",
     "balance_pos": "#1baf7a",
     "balance_neg": "#e34948",
-    "investment":  "#6250d6",
     "neutral":     "#888780",
 }
 
@@ -170,11 +169,6 @@ def sugerir_palabra_clave(descripcion: str) -> str:
         if len(palabra) >= MIN_LONG_PALABRA and not any(c.isdigit() for c in palabra) and palabra not in _IGNORAR:
             return palabra
     return ""
-
-
-def coincide(descripcion: str, palabra: str) -> bool:
-    """La palabra (o frase) aparece como palabras completas: 'bar' no coincide con 'barcelona'."""
-    return f" {normalizar(palabra)} " in f" {normalizar(descripcion)} "
 
 
 def anadir_regla(ajustes: dict, palabra: str, categoria: str) -> str | None:
@@ -437,7 +431,7 @@ def aplicar_ajustes(df: pd.DataFrame, ajustes: dict) -> pd.DataFrame:
 
 
 def validar_ajustes(datos) -> dict:
-    """Comprueba unos ajustes guardados (p. ej. en la caja fuerte) y devuelve una versión limpia.
+    """Comprueba unos ajustes guardados (p. ej. en la copia de seguridad) y devuelve una versión limpia.
 
     Lanza ValueError con el motivo si no son válidos.
     """
@@ -744,11 +738,10 @@ def parse_eb_transactions(raw: list) -> pd.DataFrame:
             "monto":       monto,
             "descripcion": desc,
             "categoria":   categoria_de[desc] if tipo == "gasto" else "Ingreso",
-            "recurrente":  False,
             "tipo":        tipo,
         })
 
-    columnas = ["fecha", "monto", "descripcion", "categoria", "recurrente", "tipo", "mes"]
+    columnas = ["fecha", "monto", "descripcion", "categoria", "tipo", "mes"]
     if not rows:
         return pd.DataFrame(columns=columnas)
 
